@@ -1,0 +1,36 @@
+{
+  "name": "dualscraper",
+  "version": "1.0.0",
+  "description": "Brand customer list scraper - extracts customer data from websites and social media using Apify",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FutuRexaSolutionInc/DualScraper.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/FutuRexaSolutionInc/DualScraper/issues"
+  },
+  "homepage": "https://github.com/FutuRexaSolutionInc/DualScraper#readme",
+  "dependencies": {
+    "apify-client": "^2.22.2",
+    "axios": "^1.13.5",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "json2csv": "^6.0.0-alpha.2",
+    "puppeteer-core": "^24.37.5",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "uuid": "^13.0.0",
+    "winston": "^3.19.0"
+  }
+}

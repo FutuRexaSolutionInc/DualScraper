@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DualScraper &#8212; Brand Customer Extractor</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ======= Sidebar ======= -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo-group">
+          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <div>
+            <h1 class="logo">DualScraper</h1>
+            <p class="tagline">Brand Customer Extractor</p>
+          </div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-view="dashboard">
+          <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="nav-label">Dashboard</span>
+        </a>
+        <a href="#" class="nav-item" data-view="scraper">
+          <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <span class="nav-label">Scrape Brands</span>
+        </a>
+        <a href="#" class="nav-item" data-view="custom">
+          <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          <span class="nav-label">Custom Scrape</span>
+        </a>
+        <a href="#" class="nav-item" data-view="results">
+          <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          <span class="nav-label">Results</span>
+        </a>
+        <a href="#" class="nav-item" data-view="exports">
+          <svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span class="nav-label">Exports</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div id="statusIndicator" class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Checking...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ======= Main Content ======= -->
+    <main class="main-content">
+
+      <!-- Dashboard -->
+      <section id="view-dashboard" class="view active">
+        <header class="view-header">
+          <h2>Dashboard</h2>
+          <p>Overview of your brand customer scraping operations</p>
+        </header>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="statBrands">0</div>
+              <div class="stat-label">Configured Brands</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon stat-icon--success">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="statJobs">0</div>
+              <div class="stat-label">Completed Jobs</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon stat-icon--purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="statExports">0</div>
+              <div class="stat-label">Total Exports</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon stat-icon--amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div class="stat-body">
+              <div class="stat-value" id="statEngine">--</div>
+              <div class="stat-label">Engine Status</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Configured Brands</h3>
+          <div id="brandCards" class="brand-cards"></div>
+        </div>
+
+        <div class="section">
+          <h3>Recent Jobs</h3>
+          <div id="recentJobs" class="jobs-list">
+            <p class="empty-state">No jobs yet. Start a scrape to see results here.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Scraper -->
+      <section id="view-scraper" class="view">
+        <header class="view-header">
+          <h2>Scrape Brands</h2>
+          <p>Select a brand and data sources to extract customer lists</p>
+        </header>
+
+        <div class="scrape-form">
+          <div class="form-group">
+            <label for="brandSelect">Select Brand</label>
+            <select id="brandSelect" class="form-control">
+              <option value="">-- Select a Brand --</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label>Data Sources</label>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="srcWebsite" value="website" checked>
+                <svg class="cb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                <span>Website (Reviews &amp; Testimonials)</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="srcInstagram" value="instagram" checked>
+                <svg class="cb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+                <span>Instagram (Comments &amp; Engagement)</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="srcFacebook" value="facebook">
+                <svg class="cb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z"/></svg>
+                <span>Facebook (Comments &amp; Reactions)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button id="btnScrape" class="btn btn-primary btn-lg">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Start Scraping
+            </button>
+            <button id="btnScrapeAll" class="btn btn-outline btn-lg">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              Scrape All Brands
+            </button>
+          </div>
+        </div>
+
+        <div id="scrapeProgress" class="scrape-progress hidden">
+          <h3>Scraping Progress</h3>
+          <div class="progress-bar-container">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div id="progressLog" class="progress-log"></div>
+        </div>
+
+        <div id="scrapeResults" class="scrape-results hidden">
+          <h3>Scraping Results</h3>
+          <div id="resultsSummary" class="results-summary"></div>
+          <div id="resultsTable" class="results-table-container"></div>
+        </div>
+      </section>
+
+      <!-- Custom Scrape -->
+      <section id="view-custom" class="view">
+        <header class="view-header">
+          <h2>Custom Scrape</h2>
+          <p>Scrape any website URL or Instagram handle for customer data</p>
+        </header>
+
+        <div class="custom-tabs">
+          <button class="tab-btn active" data-tab="url">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+            Website URL
+          </button>
+          <button class="tab-btn" data-tab="instagram">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+            Instagram Handle
+          </button>
+        </div>
+
+        <div id="tab-url" class="tab-content active">
+          <div class="scrape-form">
+            <div class="form-group">
+              <label for="customUrl">Website URL</label>
+              <input type="url" id="customUrl" class="form-control" placeholder="https://www.example.com/products">
+            </div>
+            <div class="form-group">
+              <label for="customUrlBrand">Brand Name (optional)</label>
+              <input type="text" id="customUrlBrand" class="form-control" placeholder="Brand Name">
+            </div>
+            <button id="btnScrapeUrl" class="btn btn-primary">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Scrape Website
+            </button>
+          </div>
+        </div>
+
+        <div id="tab-instagram" class="tab-content">
+          <div class="scrape-form">
+            <div class="form-group">
+              <label for="customIgHandle">Instagram Handle</label>
+              <div class="input-with-prefix">
+                <span class="input-prefix">@</span>
+                <input type="text" id="customIgHandle" class="form-control" placeholder="brandname">
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="customIgBrand">Brand Name (optional)</label>
+              <input type="text" id="customIgBrand" class="form-control" placeholder="Brand Name">
+            </div>
+            <button id="btnScrapeIg" class="btn btn-primary">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+              Scrape Instagram
+            </button>
+          </div>
+        </div>
+
+        <div id="customResults" class="scrape-results hidden">
+          <h3>Results</h3>
+          <div id="customResultsSummary" class="results-summary"></div>
+          <div id="customResultsTable" class="results-table-container"></div>
+        </div>
+      </section>
+
+      <!-- Results -->
+      <section id="view-results" class="view">
+        <header class="view-header">
+          <h2>Saved Results</h2>
+          <p>View previously scraped customer data by brand</p>
+        </header>
+
+        <div class="form-group">
+          <label for="resultsBrandSelect">Select Brand</label>
+          <select id="resultsBrandSelect" class="form-control">
+            <option value="">-- Select a Brand --</option>
+          </select>
+        </div>
+
+        <button id="btnLoadResults" class="btn btn-primary">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+          Load Results
+        </button>
+
+        <div id="savedResults" class="scrape-results hidden">
+          <div id="savedResultsSummary" class="results-summary"></div>
+          <div id="savedResultsTable" class="results-table-container"></div>
+        </div>
+      </section>
+
+      <!-- Exports -->
+      <section id="view-exports" class="view">
+        <header class="view-header">
+          <h2>Export Files</h2>
+          <p>Download scraped data as JSON or CSV files</p>
+        </header>
+
+        <div id="exportsList" class="exports-list">
+          <p class="empty-state">No exports yet. Run a scrape to generate export files.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/js/app.js"></script>
+</body>
+</html>
