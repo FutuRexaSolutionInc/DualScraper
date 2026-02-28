@@ -13,7 +13,6 @@ const createApiRouter = require('./src/routes/api');
 // ============================================================
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || 'localhost';
-const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
 
 // Ensure required directories exist
 const dirs = ['data', 'logs'];
@@ -27,16 +26,7 @@ for (const dir of dirs) {
 // ============================================================
 // Initialize Scraper
 // ============================================================
-const orchestrator = new ScraperOrchestrator(APIFY_API_TOKEN);
-
-if (!APIFY_API_TOKEN || APIFY_API_TOKEN === 'your_apify_api_token_here') {
-  logger.info('========================================================');
-  logger.info('  APIFY_API_TOKEN is not set (optional).');
-  logger.info('  Instagram & Facebook will use FREE direct scraping.');
-  logger.info('  Set an Apify token for fallback when direct fails.');
-  logger.info('  Website scraping always works without any token.');
-  logger.info('========================================================');
-}
+const orchestrator = new ScraperOrchestrator();
 
 // ============================================================
 // Express App
@@ -85,8 +75,7 @@ app.listen(PORT, HOST, () => {
   logger.info(`  DualScraper is running!`);
   logger.info(`  Local:   http://${HOST}:${PORT}`);
   logger.info(`  API:     http://${HOST}:${PORT}/api`);
-  logger.info(`  Apify:   ${APIFY_API_TOKEN ? 'Configured (fallback) ✓' : 'Not set (free mode) ✓'}`);
-  logger.info(`  Mode:    FREE direct scraping (Instagram, Facebook, Website)`);
+  logger.info(`  Mode:    Instagram-only (free, Puppeteer + internal API)`);
   logger.info('========================================================');
 });
 

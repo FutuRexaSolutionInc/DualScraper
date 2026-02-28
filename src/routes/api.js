@@ -19,18 +19,17 @@ function createApiRouter(orchestrator) {
       name: b.name,
       slug: b.slug,
       instagram: b.instagram?.handles || [],
-      facebook: b.facebook?.pages || [],
-      websiteUrls: b.website?.urls || [],
     }));
     res.json({ success: true, brands });
   });
 
   // ============================================================
   // POST /api/scrape - Start scraping a brand
-  // Body: { brand: "slug", sources: ["website","instagram","facebook"] }
+  // Body: { brand: "slug" }
   // ============================================================
   router.post('/scrape', async (req, res) => {
-    const { brand, sources = ['website', 'instagram'] } = req.body;
+    const { brand } = req.body;
+    const sources = ['instagram'];
 
     if (!brand) {
       return res.status(400).json({ success: false, error: 'Brand slug is required' });
@@ -63,10 +62,11 @@ function createApiRouter(orchestrator) {
 
   // ============================================================
   // POST /api/scrape-sync - Synchronous scraping (waits for result)
-  // Body: { brand: "slug", sources: ["website","instagram","facebook"] }
+  // Body: { brand: "slug" }
   // ============================================================
   router.post('/scrape-sync', async (req, res) => {
-    const { brand, sources = ['website', 'instagram'] } = req.body;
+    const { brand } = req.body;
+    const sources = ['instagram'];
 
     if (!brand) {
       return res.status(400).json({ success: false, error: 'Brand slug is required' });
@@ -101,39 +101,18 @@ function createApiRouter(orchestrator) {
 
   // ============================================================
   // POST /api/scrape-all - Scrape all brands
-  // Body: { sources: ["website","instagram"] }
   // ============================================================
   router.post('/scrape-all', async (req, res) => {
-    const { sources = ['website', 'instagram'] } = req.body;
-
     res.json({
       success: true,
       message: 'Scraping all brands started',
       brands: getAllBrands().map((b) => b.name),
-      sources,
+      sources: ['instagram'],
     });
 
-    orchestrator.scrapeAllBrands(sources).catch((error) => {
+    orchestrator.scrapeAllBrands().catch((error) => {
       logger.error(`Scrape-all failed: ${error.message}`);
     });
-  });
-
-  // ============================================================
-  // POST /api/scrape-url - Scrape a custom URL
-  // Body: { url: "https://...", brand: "Brand Name" }
-  // ============================================================
-  router.post('/scrape-url', async (req, res) => {
-    const { url, brand } = req.body;
-    if (!url) {
-      return res.status(400).json({ success: false, error: 'URL is required' });
-    }
-
-    try {
-      const result = await orchestrator.scrapeCustomUrl(url, brand);
-      res.json({ success: true, ...result });
-    } catch (error) {
-      res.status(500).json({ success: false, error: error.message });
-    }
   });
 
   // ============================================================
@@ -226,8 +205,7 @@ function createApiRouter(orchestrator) {
     res.json({
       success: true,
       status: {
-        apifyConfigured: !!orchestrator.apifyToken,
-        freeMode: true,
+        mode: 'instagram-only',
         runningJobs: running,
         completedJobs: completed,
         totalExports: exports.length,

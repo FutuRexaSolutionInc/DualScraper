@@ -1,40 +1,27 @@
-const WebsiteScraper = require('./websiteScraper');
 const InstagramScraper = require('./instagramScraper');
-const FacebookScraper = require('./facebookScraper');
 const { getBrand, getAllBrands } = require('../config/brands');
 const { deduplicateCustomers } = require('../utils/helpers');
 const { exportToJson, exportToCsv } = require('../utils/exporters');
 const logger = require('../utils/logger');
 
 /**
- * Scraper Orchestrator
- * Coordinates all scraping operations across different platforms
- *
- * Instagram & Facebook use FREE direct scraping by default.
- * Apify token is optional — used only as a fallback when direct scraping
- * returns 0 results. Website scraping is always free (Cheerio-based).
+ * Scraper Orchestrator — Instagram Only
+ * Coordinates all scraping operations via Puppeteer + Instagram internal APIs.
+ * 100% free, no API keys required.
  */
 class ScraperOrchestrator {
-  constructor(apifyToken) {
-    this.apifyToken = apifyToken;
-    this.websiteScraper = new WebsiteScraper();
-
-    // Instagram & Facebook work WITHOUT Apify token (free direct scraping)
-    // Apify token is passed as optional fallback
-    this.instagramScraper = new InstagramScraper(apifyToken || null);
-    this.facebookScraper = new FacebookScraper(apifyToken || null);
-
-    // Track active jobs
+  constructor() {
+    this.instagramScraper = new InstagramScraper();
     this.activeJobs = new Map();
   }
 
   /**
-   * Scrape a single brand across specified sources
+   * Scrape a single brand's Instagram
    * @param {string} brandSlug - Brand identifier
-   * @param {string[]} sources - Array of sources: ['website', 'instagram', 'facebook']
+   * @param {string[]} sources - Reserved for future use (always ['instagram'])
    * @param {Function} progressCallback - Optional callback for progress updates
    */
-  async scrapeBrand(brandSlug, sources = ['website', 'instagram'], progressCallback = null) {
+  async scrapeBrand(brandSlug, sources = ['instagram'], progressCallback = null) {
     const brandConfig = getBrand(brandSlug);
     if (!brandConfig) {
       throw new Error(`Unknown brand: ${brandSlug}. Available: ${getAllBrands().map((b) => b.slug).join(', ')}`);
@@ -45,7 +32,7 @@ class ScraperOrchestrator {
       id: jobId,
       brand: brandConfig.name,
       brandSlug,
-      sources,
+      sources: ['instagram'],
       status: 'running',
       startedAt: new Date().toISOString(),
       progress: {},
@@ -54,66 +41,32 @@ class ScraperOrchestrator {
     };
     this.activeJobs.set(jobId, job);
 
-    const allCustomers = [];
     const report = (msg) => {
       if (progressCallback) progressCallback(msg);
       logger.info(msg);
     };
 
-    report(`Starting scrape for ${brandConfig.name} from sources: ${sources.join(', ')}`);
+    report(`Starting Instagram scrape for ${brandConfig.name}...`);
 
-    // ---- Website scraping (always free — Cheerio) ----
-    if (sources.includes('website')) {
-      job.progress.website = { status: 'running', found: 0 };
-      report(`[Website] Scraping ${brandConfig.name} website...`);
-      try {
-        const websiteCustomers = await this.websiteScraper.scrapeBrand(brandConfig);
-        allCustomers.push(...websiteCustomers);
-        job.progress.website = { status: 'completed', found: websiteCustomers.length };
-        report(`[Website] Found ${websiteCustomers.length} customers from website`);
-      } catch (error) {
-        job.progress.website = { status: 'failed', found: 0 };
-        job.errors.push({ source: 'website', error: error.message });
-        report(`[Website] Error: ${error.message}`);
-      }
+    job.progress.instagram = { status: 'running', found: 0 };
+    let allCustomers = [];
+
+    try {
+      allCustomers = await this.instagramScraper.scrapeCommenters(
+        brandConfig.name,
+        brandConfig.instagram
+      );
+      job.progress.instagram = { status: 'completed', found: allCustomers.length };
+      report(`[Instagram] Found ${allCustomers.length} customers for ${brandConfig.name}`);
+    } catch (error) {
+      job.progress.instagram = { status: 'failed', found: 0 };
+      job.errors.push({ source: 'instagram', error: error.message });
+      report(`[Instagram] Error: ${error.message}`);
     }
 
-    // ---- Instagram scraping (FREE direct + optional Apify fallback) ----
-    if (sources.includes('instagram')) {
-      job.progress.instagram = { status: 'running', found: 0 };
-      report(`[Instagram] Scraping ${brandConfig.name} Instagram (free mode)...`);
-      try {
-        const igCustomers = await this.instagramScraper.scrapeCommenters(brandConfig.name, brandConfig.instagram);
-        allCustomers.push(...igCustomers);
-        job.progress.instagram = { status: 'completed', found: igCustomers.length };
-        report(`[Instagram] Found ${igCustomers.length} customers from Instagram`);
-      } catch (error) {
-        job.progress.instagram = { status: 'failed', found: 0 };
-        job.errors.push({ source: 'instagram', error: error.message });
-        report(`[Instagram] Error: ${error.message}`);
-      }
-    }
-
-    // ---- Facebook scraping (FREE direct + optional Apify fallback) ----
-    if (sources.includes('facebook')) {
-      job.progress.facebook = { status: 'running', found: 0 };
-      report(`[Facebook] Scraping ${brandConfig.name} Facebook...`);
-      try {
-        const fbCustomers = await this.facebookScraper.scrapePageCommenters(brandConfig.name, { pageIds: brandConfig.facebook?.pages || [] });
-        allCustomers.push(...fbCustomers);
-        job.progress.facebook = { status: 'completed', found: fbCustomers.length };
-        report(`[Facebook] Found ${fbCustomers.length} customers from Facebook`);
-      } catch (error) {
-        job.progress.facebook = { status: 'failed', found: 0 };
-        job.errors.push({ source: 'facebook', error: error.message });
-        report(`[Facebook] Error: ${error.message}`);
-      }
-    }
-
-    // Deduplicate customers
+    // Deduplicate
     const uniqueCustomers = deduplicateCustomers(allCustomers);
-
-    report(`Scraping complete for ${brandConfig.name}. Total unique customers: ${uniqueCustomers.length}`);
+    report(`Scrape complete for ${brandConfig.name}. Unique customers: ${uniqueCustomers.length}`);
 
     // Export results
     const jsonFile = exportToJson(brandSlug, uniqueCustomers);
@@ -136,7 +89,7 @@ class ScraperOrchestrator {
   /**
    * Scrape all configured brands
    */
-  async scrapeAllBrands(sources = ['website', 'instagram'], progressCallback = null) {
+  async scrapeAllBrands(sources = ['instagram'], progressCallback = null) {
     const brands = getAllBrands();
     const results = [];
 
@@ -156,28 +109,6 @@ class ScraperOrchestrator {
     }
 
     return results;
-  }
-
-  /**
-   * Scrape a custom URL (not in config)
-   */
-  async scrapeCustomUrl(url, brandName) {
-    const customers = await this.websiteScraper.scrapeUrl(url, brandName);
-    const uniqueCustomers = deduplicateCustomers(customers);
-
-    if (uniqueCustomers.length > 0) {
-      const slug = (brandName || 'custom').toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      exportToJson(slug, uniqueCustomers);
-      exportToCsv(slug, uniqueCustomers);
-    }
-
-    return {
-      brand: brandName || 'Custom',
-      url,
-      totalFound: customers.length,
-      totalUnique: uniqueCustomers.length,
-      customers: uniqueCustomers,
-    };
   }
 
   /**

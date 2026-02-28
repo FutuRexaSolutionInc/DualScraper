@@ -6,9 +6,7 @@
 
   // ── SVG Icon Templates ──────────────────────────────────────
   const SVG = {
-    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>',
     instagram: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>',
-    facebook: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 2h-3a5 5 0 00-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 011-1h3z"/></svg>',
     download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
     users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>',
     play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>',
@@ -75,7 +73,6 @@
   function setupButtons() {
     $('#btnScrape').addEventListener('click', startScrape);
     $('#btnScrapeAll').addEventListener('click', scrapeAll);
-    $('#btnScrapeUrl').addEventListener('click', scrapeCustomUrl);
     $('#btnScrapeIg').addEventListener('click', scrapeCustomInstagram);
     $('#btnLoadResults').addEventListener('click', loadSavedResults);
   }
@@ -114,16 +111,13 @@
     const container = $('#brandCards');
     container.innerHTML = brands
       .map((b) => {
-        const tags = [];
-        if (b.websiteUrls.length) tags.push(`${icon('globe', 'brand-tag-icon')} Website`);
-        if (b.instagram.length) tags.push(`${icon('instagram', 'brand-tag-icon')} Instagram`);
-        if (b.facebook.length) tags.push(`${icon('facebook', 'brand-tag-icon')} Facebook`);
+        const handles = (b.instagram || []).map((h) => `@${h}`).join(', ');
 
         return `
           <div class="brand-card">
             <div class="brand-card-name">${b.name}</div>
             <div class="brand-card-tags">
-              ${tags.map((t) => `<span class="brand-tag">${t}</span>`).join('')}
+              <span class="brand-tag">${icon('instagram', 'brand-tag-icon')} ${handles || 'Instagram'}</span>
             </div>
             <div class="brand-card-actions">
               <button class="btn btn-primary btn-sm" onclick="window.__scrape('${b.slug}')">
@@ -168,21 +162,14 @@
       const dot = $('.status-dot');
       const txt = $('.status-text');
 
-      if (s.freeMode) {
-        dot.className = 'status-dot online';
-        txt.textContent = s.apifyConfigured ? 'Engine Ready (+ Apify Fallback)' : 'Engine Ready (Free Mode)';
-      } else {
-        dot.className = 'status-dot offline';
-        txt.textContent = 'Engine Not Configured';
-      }
+      dot.className = 'status-dot online';
+      txt.textContent = 'Engine Ready (Instagram)';
 
       $('#statJobs').textContent = s.completedJobs;
       $('#statExports').textContent = s.totalExports;
-      $('#statEngine').textContent = s.freeMode ? 'Online' : 'Offline';
+      $('#statEngine').textContent = 'Online';
 
-      // Load jobs
       loadJobs();
-      // Load exports
       loadExports();
     } catch {
       $('.status-dot').className = 'status-dot offline';
@@ -268,15 +255,7 @@
       return;
     }
 
-    const sources = [];
-    if ($('#srcWebsite').checked) sources.push('website');
-    if ($('#srcInstagram').checked) sources.push('instagram');
-    if ($('#srcFacebook').checked) sources.push('facebook');
-
-    if (!sources.length) {
-      showToast('Select at least one data source', 'error');
-      return;
-    }
+    const sources = ['instagram'];
 
     const progress = $('#scrapeProgress');
     const results = $('#scrapeResults');
@@ -342,16 +321,6 @@
 
   // ── Scrape All ──────────────────────────────────────────────
   async function scrapeAll() {
-    const sources = [];
-    if ($('#srcWebsite').checked) sources.push('website');
-    if ($('#srcInstagram').checked) sources.push('instagram');
-    if ($('#srcFacebook').checked) sources.push('facebook');
-
-    if (!sources.length) {
-      showToast('Select at least one data source', 'error');
-      return;
-    }
-
     const progress = $('#scrapeProgress');
     progress.classList.remove('hidden');
     const log = $('#progressLog');
@@ -360,13 +329,13 @@
     bar.style.width = '5%';
 
     addLog(log, 'Starting scrape for ALL brands...', 'info');
-    addLog(log, `Sources: ${sources.join(', ')}`, 'info');
+    addLog(log, 'Source: Instagram', 'info');
 
     try {
       const res = await fetch('/api/scrape-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sources }),
+        body: JSON.stringify({}),
       });
       const data = await res.json();
 
@@ -405,42 +374,6 @@
       } catch {
         /* retry */
       }
-    }
-  }
-
-  // ── Custom URL ──────────────────────────────────────────────
-  async function scrapeCustomUrl() {
-    const url = $('#customUrl').value.trim();
-    if (!url) {
-      showToast('Please enter a URL', 'error');
-      return;
-    }
-
-    const brand = $('#customUrlBrand').value.trim() || 'Custom';
-    showToast('Scraping website...', 'info');
-
-    try {
-      const res = await fetch('/api/scrape-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, brand }),
-      });
-      const data = await res.json();
-
-      if (!data.success) {
-        showToast(data.error, 'error');
-        return;
-      }
-
-      showToast(`Found ${data.customers?.length || 0} customers`, 'success');
-      displayResults(
-        { customers: data.customers || [], totalUnique: data.customers?.length || 0, brand },
-        '#customResultsSummary',
-        '#customResultsTable',
-        '#customResults'
-      );
-    } catch (err) {
-      showToast('Scrape failed: ' + err.message, 'error');
     }
   }
 
@@ -557,8 +490,7 @@
           <tbody>`;
 
     page.forEach((c, i) => {
-      const srcClass = (c.source || '').toLowerCase();
-      const srcIcon = srcClass === 'website' ? 'globe' : srcClass === 'instagram' ? 'instagram' : 'facebook';
+      const srcClass = 'instagram';
       const profileHtml = c.profileUrl
         ? `<a href="${c.profileUrl}" target="_blank" class="profile-link">${icon('externalLink', 'btn-icon')} View</a>`
         : '—';
@@ -567,7 +499,7 @@
             <tr>
               <td>${start + i + 1}</td>
               <td><strong>${escHtml(c.name || c.username || 'Unknown')}</strong></td>
-              <td><span class="source-badge ${srcClass}">${icon(srcIcon)} ${srcClass}</span></td>
+              <td><span class="source-badge instagram">${icon('instagram')} instagram</span></td>
               <td>${escHtml(c.engagementType || '—')}</td>
               <td title="${escHtml(c.content || '')}">${truncate(c.content || '—', 60)}</td>
               <td>${profileHtml}</td>

@@ -6,38 +6,29 @@ const { createCustomerRecord, delay } = require('../utils/helpers');
 puppeteer.use(StealthPlugin());
 
 /**
- * Instagram Scraper — FREE, Puppeteer-based (headless Chrome + stealth)
+ * Instagram Scraper — FREE, Apify-style (GraphQL API + Puppeteer session)
  *
- * Uses a real headless browser to navigate Instagram like a human.
- * No API key, no login required — extracts from public profiles/posts.
+ * Strategy (same as Apify internally):
+ *   1. Launch stealth Chromium to establish a valid Instagram session
+ *   2. Use Instagram's internal REST API for profile info + post list
+ *   3. Use REST v1 API for paginated comments on each post
+ *   4. Fallback cascade: REST v1 → GraphQL → XHR interception → DOM
+ *   5. Single browser session shared across all handles (session reuse)
  *
- * Approach:
- *   1. Launch stealth Chromium browser
- *   2. Navigate to profile page → extract post shortcodes
- *   3. For each post → navigate to post page → extract commenters
- *   4. Also scrape hashtag explore pages for additional customers
- *   5. Falls back to Apify only if token is provided AND Puppeteer found 0
+ * No API key, no login, no Apify — 100% free.
  */
 class InstagramScraper {
-  constructor(apifyToken = null) {
-    this.apifyToken = apifyToken;
-    this.apifyClient = null;
-    if (apifyToken) {
-      try {
-        const { ApifyClient } = require('apify-client');
-        this.apifyClient = new ApifyClient({ token: apifyToken });
-      } catch (_) {
-        logger.debug('apify-client not available; Apify fallback disabled');
-      }
-    }
-    this.MAX_POSTS = 12;      // max posts to check per profile
-    this.MAX_COMMENTS = 30;   // max comments to extract per post
+  constructor() {
+    this.MAX_POSTS = 15;                // max posts to scrape per profile
+    this.MAX_COMMENTS_PER_POST = 200;   // max comments per post (paginated)
+    this.IG_APP_ID = '936619743392459'; // Instagram's public web app ID
     this.BROWSER_PATH = this._findBrowser();
   }
 
-  /**
-   * Detect installed Chrome or Edge on Windows
-   */
+  /* ================================================================
+     Browser setup
+     ================================================================ */
+
   _findBrowser() {
     const fs = require('fs');
     const paths = [
@@ -49,13 +40,9 @@ class InstagramScraper {
     for (const p of paths) {
       if (fs.existsSync(p)) return p;
     }
-    // Fallback: try default puppeteer Chromium
     return undefined;
   }
 
-  /**
-   * Launch a stealth browser instance
-   */
   async _launchBrowser() {
     const launchOpts = {
       headless: 'new',
@@ -82,440 +69,926 @@ class InstagramScraper {
      ================================================================ */
 
   /**
-   * Scrape commenters/engagers from a brand's Instagram profiles and hashtags
+   * Scrape commenters from a brand's Instagram profiles + hashtags.
+   * Uses a single browser session for all handles (Apify-style).
    */
   async scrapeCommenters(brandName, config) {
     const allCustomers = [];
     const handles = config.handles || [];
     const hashtags = config.hashtags || [];
 
-    logger.info(`[Instagram] Scraping ${brandName} Instagram (Puppeteer free mode)...`);
+    logger.info(`[Instagram] Scraping ${brandName} (Puppeteer + internal API)...`);
 
-    // Scrape each profile handle
-    for (const handle of handles) {
-      try {
-        const customers = await this._scrapeProfile(handle, brandName);
-        allCustomers.push(...customers);
-        logger.info(`[Instagram] @${handle}: found ${customers.length} customers`);
-      } catch (err) {
-        logger.warn(`[Instagram] Error scraping @${handle}: ${err.message}`);
-      }
-      await delay(2000 + Math.random() * 3000);
-    }
+    let browser;
+    try {
+      browser = await this._launchBrowser();
+      const page = await browser.newPage();
 
-    // Scrape hashtags
-    for (const tag of hashtags) {
-      try {
-        const customers = await this._scrapeHashtag(tag, brandName);
-        allCustomers.push(...customers);
-        logger.info(`[Instagram] #${tag}: found ${customers.length} customers`);
-      } catch (err) {
-        logger.warn(`[Instagram] Error scraping #${tag}: ${err.message}`);
-      }
-      await delay(2000 + Math.random() * 3000);
-    }
+      // Establish session (cookies, CSRF token)
+      await this._initSession(page);
 
-    // If Puppeteer got 0 and Apify is available, try Apify as last resort
-    if (allCustomers.length === 0 && this.apifyClient) {
-      logger.info('[Instagram] Puppeteer found 0, trying Apify fallback...');
+      // Scrape each profile
       for (const handle of handles) {
         try {
-          const apifyCustomers = await this._apifyProfileFallback(handle, brandName);
-          allCustomers.push(...apifyCustomers);
+          const customers = await this._scrapeProfileViaAPI(page, handle, brandName);
+          allCustomers.push(...customers);
+          logger.info(`[Instagram] @${handle}: ${customers.length} customers`);
         } catch (err) {
-          logger.warn(`[IG-Apify] Fallback failed: ${err.message}`);
+          logger.warn(`[Instagram] Error scraping @${handle}: ${err.message}`);
         }
+        await delay(3000 + Math.random() * 4000);
+      }
+
+      // Scrape hashtags
+      for (const tag of hashtags) {
+        try {
+          const customers = await this._scrapeHashtagViaAPI(page, tag, brandName);
+          allCustomers.push(...customers);
+          logger.info(`[Instagram] #${tag}: ${customers.length} customers`);
+        } catch (err) {
+          logger.warn(`[Instagram] Error scraping #${tag}: ${err.message}`);
+        }
+        await delay(3000 + Math.random() * 4000);
+      }
+
+      await browser.close();
+    } catch (err) {
+      logger.error(`[Instagram] Browser session error: ${err.message}`);
+      if (browser) await browser.close().catch(() => {});
+    }
+
+    // Deduplicate by username
+    const seen = new Set();
+    const unique = allCustomers.filter((c) => {
+      const key = (c.username || '').toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    logger.info(`[Instagram] Total: ${unique.length} unique customers for ${brandName}`);
+    return unique;
+  }
+
+  /* ================================================================
+     Session management
+     ================================================================ */
+
+  async _initSession(page) {
+    logger.info('[IG-Session] Establishing Instagram session...');
+
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+    // Visit homepage to get cookies (csrftoken, ig_did, mid)
+    await page.goto('https://www.instagram.com/', {
+      waitUntil: 'networkidle2',
+      timeout: 45000,
+    });
+    await delay(3000 + Math.random() * 2000);
+
+    // Dismiss cookie / consent popups
+    try {
+      const buttons = await page.$$('button');
+      for (const btn of buttons) {
+        const text = await btn.evaluate((el) => (el.textContent || '').trim());
+        if (/accept|allow|got it|agree|only allow/i.test(text)) {
+          await btn.click();
+          await delay(1000);
+          break;
+        }
+      }
+    } catch {}
+
+    // Dismiss login prompt if it covers the page (click elsewhere)
+    try {
+      const closeButtons = await page.$$('[aria-label="Close"], [role="button"]');
+      for (const btn of closeButtons) {
+        const text = await btn.evaluate((el) => (el.textContent || '').trim());
+        if (/not now|close|dismiss/i.test(text)) {
+          await btn.click();
+          await delay(500);
+          break;
+        }
+      }
+    } catch {}
+
+    const cookies = await page.cookies();
+    const hasCsrf = cookies.some((c) => c.name === 'csrftoken');
+    logger.info(`[IG-Session] Session ready — CSRF: ${hasCsrf ? 'YES' : 'NO'}, Cookies: ${cookies.length}`);
+  }
+
+  /* ================================================================
+     Profile scraping via internal API
+     ================================================================ */
+
+  async _scrapeProfileViaAPI(page, username, brandName) {
+    logger.info(`[IG-API] Fetching profile @${username}...`);
+
+    // Step 1: Get profile + posts via internal API
+    const profileData = await this._fetchProfileInfo(page, username);
+
+    if (!profileData) {
+      logger.warn(`[IG-API] Profile API failed for @${username}, trying DOM fallback...`);
+      return this._scrapeProfileDOM(page, username, brandName);
+    }
+
+    const userId = profileData.id;
+    const followerCount = profileData.edge_followed_by?.count || 0;
+    const mediaCount = profileData.edge_owner_to_timeline_media?.count || 0;
+    logger.info(`[IG-API] @${username}: ${followerCount} followers, ${mediaCount} posts`);
+
+    // Step 2: Extract posts (first 12 come with profile)
+    let posts = this._extractPostsFromProfile(profileData);
+    logger.info(`[IG-API] ${posts.length} posts from profile data`);
+
+    // Step 3: Paginate for more posts
+    const pageInfo = profileData.edge_owner_to_timeline_media?.page_info;
+    if (pageInfo?.has_next_page && posts.length < this.MAX_POSTS) {
+      try {
+        const morePosts = await this._fetchMorePosts(page, userId, pageInfo.end_cursor);
+        posts.push(...morePosts);
+        logger.info(`[IG-API] Total posts after pagination: ${posts.length}`);
+      } catch (err) {
+        logger.debug(`[IG-API] Post pagination failed: ${err.message}`);
       }
     }
 
-    logger.info(`[Instagram] Found ${allCustomers.length} customers from Instagram`);
+    // Step 4: Sort by engagement (most comments first)
+    posts.sort((a, b) => b.commentCount - a.commentCount);
+    const postsToScrape = posts.slice(0, this.MAX_POSTS);
+
+    // Step 5: Fetch comments for each post
+    const allCustomers = [];
+    let workingStrategy = null;
+
+    for (const post of postsToScrape) {
+      if (post.commentCount === 0) continue;
+
+      try {
+        const { commenters, strategy } = await this._fetchPostCommenters(
+          page, post, username, brandName, workingStrategy
+        );
+        if (strategy) workingStrategy = strategy;
+        allCustomers.push(...commenters);
+        logger.debug(
+          `[IG-API] Post ${post.shortcode}: ${commenters.length} commenters via ${strategy || 'none'}`
+        );
+      } catch (err) {
+        logger.debug(`[IG-API] Comment fetch failed for ${post.shortcode}: ${err.message}`);
+      }
+      await delay(1500 + Math.random() * 2500);
+    }
+
     return allCustomers;
   }
 
-  /* ================================================================
-     Profile scraping — Puppeteer
-     ================================================================ */
-
-  async _scrapeProfile(username, brandName) {
-    logger.info(`[IG-Puppeteer] Scraping profile @${username}`);
-    let browser;
-    try {
-      browser = await this._launchBrowser();
-      const page = await browser.newPage();
-
-      // Set cookies to dismiss login prompts
-      await page.setCookie({
-        name: 'ig_did',
-        value: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',
-        domain: '.instagram.com',
-      });
-
-      // Navigate to profile
-      const url = `https://www.instagram.com/${username}/`;
-      logger.info(`[IG-Puppeteer] Navigating to ${url}`);
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-      await delay(2000 + Math.random() * 2000);
-
-      // Check for login wall / page not found
-      const pageContent = await page.content();
-      if (pageContent.includes('Page Not Found') || pageContent.includes("this page isn't available")) {
-        logger.warn(`[IG-Puppeteer] Profile @${username} not found`);
-        await browser.close();
-        return [];
-      }
-
-      // Extract shortcodes from the page
-      const shortcodes = await this._extractShortcodes(page);
-      logger.info(`[IG-Puppeteer] Found ${shortcodes.length} post shortcodes for @${username}`);
-
-      if (shortcodes.length === 0) {
-        // Try extracting from page source JSON
-        const jsonShortcodes = await this._extractShortcodesFromSource(page);
-        shortcodes.push(...jsonShortcodes);
-        logger.info(`[IG-Puppeteer] Found ${jsonShortcodes.length} shortcodes from page source`);
-      }
-
-      // Limit posts to check
-      const postsToCheck = shortcodes.slice(0, this.MAX_POSTS);
-      const customers = [];
-
-      // Scrape comments from each post
-      for (const shortcode of postsToCheck) {
+  /**
+   * Fetch profile info via Instagram's internal REST API
+   */
+  async _fetchProfileInfo(page, username) {
+    const appId = this.IG_APP_ID;
+    return page.evaluate(
+      async (username, appId) => {
         try {
-          const postCustomers = await this._scrapePostComments(page, shortcode, username, brandName);
-          customers.push(...postCustomers);
-        } catch (err) {
-          logger.debug(`[IG-Puppeteer] Error on post ${shortcode}: ${err.message}`);
-        }
-        await delay(1500 + Math.random() * 2500);
-      }
-
-      await browser.close();
-      return customers;
-    } catch (err) {
-      logger.warn(`[IG-Puppeteer] Profile scrape failed for @${username}: ${err.message}`);
-      if (browser) await browser.close().catch(() => {});
-      return [];
-    }
-  }
-
-  /**
-   * Extract post shortcodes from Instagram profile grid links
-   */
-  async _extractShortcodes(page) {
-    try {
-      const shortcodes = await page.evaluate(() => {
-        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-        const codes = [];
-        links.forEach((link) => {
-          const href = link.getAttribute('href');
-          const match = href.match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
-          if (match && match[2] && !codes.includes(match[2])) {
-            codes.push(match[2]);
-          }
-        });
-        return codes;
-      });
-      return shortcodes;
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Try extracting shortcodes from embedded JSON in page source
-   */
-  async _extractShortcodesFromSource(page) {
-    try {
-      const html = await page.content();
-      const codes = [];
-      // Match shortcodes from various JSON patterns
-      const patterns = [
-        /"shortcode"\s*:\s*"([A-Za-z0-9_-]+)"/g,
-        /\/p\/([A-Za-z0-9_-]+)\//g,
-        /\/reel\/([A-Za-z0-9_-]+)\//g,
-      ];
-      for (const pattern of patterns) {
-        let m;
-        while ((m = pattern.exec(html)) !== null) {
-          if (m[1] && !codes.includes(m[1]) && m[1].length > 5) {
-            codes.push(m[1]);
-          }
-        }
-      }
-      return codes;
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Navigate to a post page and extract commenters
-   */
-  async _scrapePostComments(page, shortcode, profileUsername, brandName) {
-    const postUrl = `https://www.instagram.com/p/${shortcode}/`;
-    logger.debug(`[IG-Puppeteer] Checking post ${shortcode}`);
-
-    try {
-      await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 25000 });
-      await delay(2000 + Math.random() * 2000);
-
-      // Try to click "Load more comments" / "View all comments" buttons
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const loadMoreSelectors = [
-            'button[aria-label*="Load more comments"]',
-            'button[aria-label*="View all"]',
-            'span[aria-label*="Load more"]',
-            'button span:not(:empty)',
-          ];
-          let clicked = false;
-          for (const sel of loadMoreSelectors) {
-            const btns = await page.$$(sel);
-            for (const btn of btns) {
-              const text = await btn.evaluate((el) => el.textContent || '');
-              if (text.match(/view|load|more|all.*comment/i)) {
-                await btn.click();
-                await delay(2000);
-                clicked = true;
-                break;
-              }
+          const resp = await fetch(
+            `/api/v1/users/web_profile_info/?username=${username}`,
+            {
+              headers: {
+                'x-ig-app-id': appId,
+                'x-requested-with': 'XMLHttpRequest',
+              },
+              credentials: 'include',
             }
-            if (clicked) break;
-          }
-          if (!clicked) break;
-        } catch { break; }
-      }
+          );
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          return data.data?.user || null;
+        } catch {
+          return null;
+        }
+      },
+      username,
+      appId
+    );
+  }
 
-      // ── Strategy 1: Intercept embedded JSON data from page source ──
-      // Instagram embeds post data (including comments) as JSON in the HTML
-      const jsonCustomers = await page.evaluate((pUser) => {
-        const results = [];
-        const seen = new Set();
+  /**
+   * Extract post metadata from profile API response
+   */
+  _extractPostsFromProfile(profileData) {
+    const edges = profileData.edge_owner_to_timeline_media?.edges || [];
+    return edges.map((edge) => ({
+      shortcode: edge.node.shortcode,
+      id: edge.node.id,
+      commentCount: edge.node.edge_media_to_comment?.count || 0,
+      likeCount:
+        edge.node.edge_liked_by?.count ||
+        edge.node.edge_media_preview_like?.count ||
+        0,
+      timestamp: edge.node.taken_at_timestamp,
+      isVideo: edge.node.is_video || false,
+    }));
+  }
 
-        // Instagram valid username regex: 1-30 chars, letters, numbers, dots, underscores
-        const isValidUsername = (u) =>
-          u &&
-          /^[a-zA-Z0-9._]{1,30}$/.test(u) &&
-          u !== pUser &&
-          !['instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
-            'developer', 'legal', 'privacy', 'terms', 'help', 'press',
-            'api', 'blog', 'jobs', 'nametag', 'session', 'login',
-            'signup', 'sign_up', 'direct'].includes(u.toLowerCase());
+  /**
+   * Paginate through more posts via GraphQL
+   */
+  async _fetchMorePosts(page, userId, endCursor) {
+    const appId = this.IG_APP_ID;
+    const maxPosts = this.MAX_POSTS;
 
-        // Try to find comment data in embedded JSON (shared_data, additional_data, etc.)
-        const scripts = document.querySelectorAll('script[type="application/json"]');
-        scripts.forEach((script) => {
-          try {
-            const json = JSON.parse(script.textContent);
-            const jsonStr = JSON.stringify(json);
+    return page.evaluate(
+      async (userId, endCursor, appId, maxPosts) => {
+        const allPosts = [];
+        let cursor = endCursor;
+        let hasNext = true;
 
-            // Find username patterns in the JSON
-            const usernameMatches = jsonStr.matchAll(/"username"\s*:\s*"([^"]+)"/g);
-            for (const m of usernameMatches) {
-              const username = m[1];
-              if (isValidUsername(username) && !seen.has(username)) {
-                seen.add(username);
-                // Try to find associated full_name
-                const nameRegex = new RegExp(`"username"\\s*:\\s*"${username}"[^}]*"full_name"\\s*:\\s*"([^"]*)"`, 'g');
-                const nameMatch = nameRegex.exec(jsonStr);
-                const name = nameMatch ? nameMatch[1] : username;
-                results.push({ username, name: name || username, comment: '' });
+        const hashes = [
+          'e769aa130647d2354c40ea6a439bfc08',
+          '69cba40317214236af40e7efa697781d',
+          '003056d32c2554def87228bc3fd9668a',
+        ];
+
+        while (hasNext && allPosts.length < maxPosts) {
+          const variables = JSON.stringify({ id: userId, first: 12, after: cursor });
+          let data = null;
+
+          for (const hash of hashes) {
+            try {
+              const resp = await fetch(
+                `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(variables)}`,
+                {
+                  headers: {
+                    'x-ig-app-id': appId,
+                    'x-requested-with': 'XMLHttpRequest',
+                  },
+                  credentials: 'include',
+                }
+              );
+              if (resp.ok) {
+                data = await resp.json();
+                if (data.data?.user?.edge_owner_to_timeline_media) break;
+                data = null;
               }
+            } catch {
+              data = null;
             }
+          }
 
-            // Also try text/comment patterns
-            const commentMatches = jsonStr.matchAll(/"text"\s*:\s*"([^"]{3,200})"/g);
-            // (comments are paired with owners in the JSON structure)
-          } catch { /* not valid JSON */ }
-        });
+          if (!data) break;
 
-        return results;
-      }, profileUsername);
-
-      // ── Strategy 2: DOM-based extraction of commenter usernames ──
-      const domCustomers = await page.evaluate((pUser) => {
-        const results = [];
-        const seen = new Set();
-
-        const isValidUsername = (u) =>
-          u &&
-          /^[a-zA-Z0-9._]{1,30}$/.test(u) &&
-          u !== pUser &&
-          !['instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
-            'developer', 'legal', 'privacy', 'terms', 'help', 'press',
-            'api', 'blog', 'jobs', 'nametag', 'session', 'login',
-            'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
-            'Sign Up', 'Log In', 'Clip'].includes(u);
-
-        // Find all <a> links on the page
-        const allLinks = document.querySelectorAll('a[href]');
-
-        allLinks.forEach((el) => {
-          const href = el.getAttribute('href') || '';
-
-          // Only match direct profile links: /username/ (single segment, no sub-paths)
-          const profileMatch = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
-          if (!profileMatch) return;
-
-          const username = profileMatch[1];
-          if (!isValidUsername(username) || seen.has(username)) return;
-
-          const text = (el.textContent || '').trim();
-          // Skip if the link text is generic navigation
-          if (['Sign Up', 'Log In', 'Log in', 'Sign up', 'Clip', 'View',
-               'More', 'Share', 'Save', 'Like', 'Reply', 'Follow',
-               'Following', 'Message', 'Options', ''].includes(text)) return;
-
-          // Only keep if the link text looks like a username or real name
-          // (not a post title, not a multi-line string, not too long)
-          if (text.length > 50 || text.includes('\n')) return;
-
-          seen.add(username);
-
-          // Try to find comment text near this element
-          let commentText = '';
-          const listItem = el.closest('li') || el.closest('div[role="button"]')?.parentElement;
-          if (listItem) {
-            const spans = listItem.querySelectorAll('span[dir="auto"]');
-            spans.forEach((s) => {
-              const t = (s.textContent || '').trim();
-              if (t.length > 3 && t.length < 300 && t !== text && t !== username) {
-                commentText = t;
-              }
+          const timeline = data.data.user.edge_owner_to_timeline_media;
+          for (const edge of timeline?.edges || []) {
+            allPosts.push({
+              shortcode: edge.node.shortcode,
+              id: edge.node.id,
+              commentCount: edge.node.edge_media_to_comment?.count || 0,
+              likeCount:
+                edge.node.edge_liked_by?.count ||
+                edge.node.edge_media_preview_like?.count ||
+                0,
+              timestamp: edge.node.taken_at_timestamp,
+              isVideo: edge.node.is_video || false,
             });
           }
 
-          results.push({
-            username,
-            name: text || username,
-            comment: commentText,
-          });
+          hasNext = timeline?.page_info?.has_next_page || false;
+          cursor = timeline?.page_info?.end_cursor || null;
+          await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1500));
+        }
+
+        return allPosts;
+      },
+      userId,
+      endCursor,
+      appId,
+      maxPosts
+    );
+  }
+
+  /* ================================================================
+     Comment fetching — 4-strategy cascade
+     ================================================================ */
+
+  async _fetchPostCommenters(page, post, profileUsername, brandName, preferredStrategy = null) {
+    let comments = [];
+    let strategy = null;
+
+    // Strategy 1: REST v1 comments API
+    if (!preferredStrategy || preferredStrategy === 'v1') {
+      comments = await this._fetchCommentsV1(page, post.id);
+      if (comments.length > 0) strategy = 'v1';
+    }
+
+    // Strategy 2: GraphQL comments query
+    if (comments.length === 0 && (!preferredStrategy || preferredStrategy === 'graphql')) {
+      comments = await this._fetchCommentsGraphQL(page, post.shortcode);
+      if (comments.length > 0) strategy = 'graphql';
+    }
+
+    // Strategy 3: XHR interception (navigate to post page)
+    if (comments.length === 0) {
+      comments = await this._fetchCommentsViaInterception(page, post.shortcode);
+      if (comments.length > 0) strategy = 'intercept';
+    }
+
+    // Strategy 4: DOM fallback
+    if (comments.length === 0) {
+      comments = await this._fetchCommentsDOMFallback(page, post.shortcode, profileUsername);
+      if (comments.length > 0) strategy = 'dom';
+    }
+
+    // Filter + convert to customer records
+    const validCustomers = [];
+    const seen = new Set();
+
+    for (const comment of comments) {
+      const username = comment.username;
+      if (!username || username === profileUsername || seen.has(username)) continue;
+      if (!this._isValidUsername(username)) continue;
+      seen.add(username);
+
+      validCustomers.push(
+        createCustomerRecord({
+          name: comment.fullName || username,
+          username,
+          profileUrl: `https://www.instagram.com/${username}/`,
+          source: 'instagram',
+          brand: brandName,
+          comment: comment.text || null,
+          engagement: { type: 'comment', postCode: post.shortcode },
+        })
+      );
+    }
+
+    return { commenters: validCustomers, strategy };
+  }
+
+  /**
+   * Strategy 1: REST v1 comments API (highest yield, paginated)
+   */
+  async _fetchCommentsV1(page, mediaId) {
+    if (!mediaId) return [];
+    const appId = this.IG_APP_ID;
+    const maxComments = this.MAX_COMMENTS_PER_POST;
+
+    return page.evaluate(
+      async (mediaId, appId, maxComments) => {
+        const allComments = [];
+        let minId = '';
+        let hasMore = true;
+
+        while (hasMore && allComments.length < maxComments) {
+          try {
+            const params = new URLSearchParams({
+              can_support_threading: 'true',
+              permalink_enabled: 'false',
+            });
+            if (minId) params.set('min_id', minId);
+
+            const resp = await fetch(`/api/v1/media/${mediaId}/comments/?${params}`, {
+              headers: {
+                'x-ig-app-id': appId,
+                'x-requested-with': 'XMLHttpRequest',
+              },
+              credentials: 'include',
+            });
+
+            if (!resp.ok) break;
+            const data = await resp.json();
+            const comments = data.comments || [];
+
+            for (const c of comments) {
+              if (c.user?.username) {
+                allComments.push({
+                  username: c.user.username,
+                  fullName: c.user.full_name || c.user.username,
+                  text: c.text || '',
+                });
+              }
+              // Nested replies
+              const children = c.preview_child_comments || c.child_comments || [];
+              for (const reply of children) {
+                if (reply.user?.username) {
+                  allComments.push({
+                    username: reply.user.username,
+                    fullName: reply.user.full_name || reply.user.username,
+                    text: reply.text || '',
+                  });
+                }
+              }
+            }
+
+            hasMore = data.has_more_comments || data.has_more_headload_comments || false;
+            minId = data.next_min_id || data.next_max_id || '';
+            if (!minId) hasMore = false;
+          } catch {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+        }
+
+        return allComments;
+      },
+      mediaId,
+      appId,
+      maxComments
+    );
+  }
+
+  /**
+   * Strategy 2: GraphQL comments query
+   */
+  async _fetchCommentsGraphQL(page, shortcode) {
+    const appId = this.IG_APP_ID;
+    const maxComments = this.MAX_COMMENTS_PER_POST;
+
+    return page.evaluate(
+      async (shortcode, appId, maxComments) => {
+        const allComments = [];
+        let endCursor = null;
+        let hasNext = true;
+
+        const hashes = [
+          'bc3296d1ce80a24b1b6e40b1e72903f5',
+          '97b41c52301f77ce508f55e66d17620e',
+          '477b65a610463740ccdb83135b2014db',
+        ];
+
+        while (hasNext && allComments.length < maxComments) {
+          const variables = { shortcode, first: 50 };
+          if (endCursor) variables.after = endCursor;
+
+          let data = null;
+          for (const hash of hashes) {
+            try {
+              const resp = await fetch(
+                `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(JSON.stringify(variables))}`,
+                {
+                  headers: {
+                    'x-ig-app-id': appId,
+                    'x-requested-with': 'XMLHttpRequest',
+                  },
+                  credentials: 'include',
+                }
+              );
+              if (resp.ok) {
+                data = await resp.json();
+                if (data.data?.shortcode_media) break;
+              }
+              data = null;
+            } catch {
+              data = null;
+            }
+          }
+
+          if (!data) break;
+
+          const media = data.data.shortcode_media;
+          const commentEdge =
+            media.edge_media_to_parent_comment || media.edge_media_to_comment;
+          if (!commentEdge) break;
+
+          for (const edge of commentEdge.edges || []) {
+            const node = edge.node;
+            if (node?.owner?.username) {
+              allComments.push({
+                username: node.owner.username,
+                fullName: node.owner.full_name || node.owner.username,
+                text: node.text || '',
+              });
+            }
+            // Threaded replies
+            if (node?.edge_threaded_comments?.edges) {
+              for (const reply of node.edge_threaded_comments.edges) {
+                if (reply.node?.owner?.username) {
+                  allComments.push({
+                    username: reply.node.owner.username,
+                    fullName: reply.node.owner.full_name || reply.node.owner.username,
+                    text: reply.node.text || '',
+                  });
+                }
+              }
+            }
+          }
+
+          hasNext = commentEdge.page_info?.has_next_page || false;
+          endCursor = commentEdge.page_info?.end_cursor || null;
+          await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+        }
+
+        return allComments;
+      },
+      shortcode,
+      appId,
+      maxComments
+    );
+  }
+
+  /**
+   * Strategy 3: Navigate to post & intercept XHR responses
+   */
+  async _fetchCommentsViaInterception(page, shortcode) {
+    const comments = [];
+
+    const handleResponse = async (response) => {
+      try {
+        const url = response.url();
+        if (!url.includes('graphql') && !url.includes('/comments')) return;
+        if (response.status() !== 200) return;
+
+        const data = await response.json().catch(() => null);
+        if (!data) return;
+
+        // GraphQL format
+        const media = data?.data?.shortcode_media || data?.data?.xdt_shortcode_media;
+        if (media) {
+          const commentEdge =
+            media.edge_media_to_parent_comment || media.edge_media_to_comment;
+          if (commentEdge?.edges) {
+            for (const edge of commentEdge.edges) {
+              if (edge.node?.owner?.username) {
+                comments.push({
+                  username: edge.node.owner.username,
+                  fullName: edge.node.owner.full_name || '',
+                  text: edge.node.text || '',
+                });
+              }
+              if (edge.node?.edge_threaded_comments?.edges) {
+                for (const reply of edge.node.edge_threaded_comments.edges) {
+                  if (reply.node?.owner?.username) {
+                    comments.push({
+                      username: reply.node.owner.username,
+                      fullName: reply.node.owner.full_name || '',
+                      text: reply.node.text || '',
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // REST v1 format
+        if (data.comments && Array.isArray(data.comments)) {
+          for (const c of data.comments) {
+            if (c.user?.username) {
+              comments.push({
+                username: c.user.username,
+                fullName: c.user.full_name || '',
+                text: c.text || '',
+              });
+            }
+          }
+        }
+      } catch {}
+    };
+
+    page.on('response', handleResponse);
+
+    try {
+      await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
+        waitUntil: 'networkidle2',
+        timeout: 20000,
+      });
+      await delay(3000);
+
+      // Click "View all comments" / "Load more"
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const buttons = await page.$$('button, span[role="button"]');
+          let clicked = false;
+          for (const btn of buttons) {
+            const text = await btn.evaluate((el) => (el.textContent || '').trim());
+            if (/view all|load more|more comment/i.test(text)) {
+              await btn.click();
+              await delay(2000);
+              clicked = true;
+              break;
+            }
+          }
+          if (!clicked) break;
+        } catch {
+          break;
+        }
+      }
+    } catch {}
+
+    page.off('response', handleResponse);
+    return comments;
+  }
+
+  /**
+   * Strategy 4: DOM fallback — embedded JSON + page links
+   */
+  async _fetchCommentsDOMFallback(page, shortcode, profileUsername) {
+    try {
+      await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
+        waitUntil: 'networkidle2',
+        timeout: 20000,
+      });
+      await delay(2000);
+
+      return page.evaluate((pUser) => {
+        const results = [];
+        const seen = new Set();
+        const blocked = new Set([
+          'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+          'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+          'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+          'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+        ]);
+        const isValid = (u) =>
+          u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
+
+        // Embedded JSON
+        document.querySelectorAll('script[type="application/json"]').forEach((script) => {
+          try {
+            const jsonStr = script.textContent;
+            for (const m of jsonStr.matchAll(/"username"\s*:\s*"([^"]+)"/g)) {
+              if (isValid(m[1]) && !seen.has(m[1])) {
+                seen.add(m[1]);
+                const nameRe = new RegExp(
+                  `"username"\\s*:\\s*"${m[1]}"[^}]*"full_name"\\s*:\\s*"([^"]*)"`
+                );
+                const nameMatch = nameRe.exec(jsonStr);
+                results.push({
+                  username: m[1],
+                  fullName: nameMatch ? nameMatch[1] : m[1],
+                  text: '',
+                });
+              }
+            }
+          } catch {}
+        });
+
+        // DOM links
+        document.querySelectorAll('a[href]').forEach((el) => {
+          const match = (el.getAttribute('href') || '').match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+          if (!match) return;
+          const username = match[1];
+          if (!isValid(username) || seen.has(username)) return;
+          const text = (el.textContent || '').trim();
+          if (text.length > 50 || text.includes('\n') || !text) return;
+          if (/^(Sign Up|Log In|Clip|View|More|Share|Save|Like|Reply|Follow|Following|Message|Options)$/i.test(text))
+            return;
+          seen.add(username);
+          results.push({ username, fullName: text || username, text: '' });
         });
 
         return results;
       }, profileUsername);
-
-      // Merge both strategies, deduplicating by username
-      const seen = new Set();
-      const allCustomers = [];
-      for (const c of [...jsonCustomers, ...domCustomers]) {
-        if (!seen.has(c.username)) {
-          seen.add(c.username);
-          allCustomers.push(c);
-        }
-      }
-
-      logger.debug(`[IG-Puppeteer] Post ${shortcode}: ${allCustomers.length} real commenters (JSON: ${jsonCustomers.length}, DOM: ${domCustomers.length})`);
-
-      // Convert to customer records
-      return allCustomers.slice(0, this.MAX_COMMENTS).map((c) =>
-        createCustomerRecord({
-          name: c.name,
-          username: c.username,
-          profileUrl: `https://www.instagram.com/${c.username}/`,
-          source: 'instagram',
-          brand: brandName,
-          comment: c.comment || null,
-          engagement: { type: 'comment', postCode: shortcode },
-        })
-      );
-    } catch (err) {
-      logger.debug(`[IG-Puppeteer] Failed to scrape post ${shortcode}: ${err.message}`);
+    } catch {
       return [];
     }
   }
 
   /* ================================================================
-     Hashtag scraping — Puppeteer
+     Hashtag scraping
      ================================================================ */
 
-  async _scrapeHashtag(hashtag, brandName) {
-    logger.info(`[IG-Puppeteer] Scraping hashtag #${hashtag}`);
-    let browser;
-    try {
-      browser = await this._launchBrowser();
-      const page = await browser.newPage();
+  async _scrapeHashtagViaAPI(page, hashtag, brandName) {
+    logger.info(`[IG-API] Scraping hashtag #${hashtag}...`);
 
-      const url = `https://www.instagram.com/explore/tags/${hashtag}/`;
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    const appId = this.IG_APP_ID;
+    let posts = await page.evaluate(
+      async (hashtag, appId) => {
+        try {
+          const resp = await fetch(`/api/v1/tags/web_info/?tag_name=${hashtag}`, {
+            headers: {
+              'x-ig-app-id': appId,
+              'x-requested-with': 'XMLHttpRequest',
+            },
+            credentials: 'include',
+          });
+          if (!resp.ok) return [];
+          const data = await resp.json();
+          const edges =
+            data.data?.hashtag?.edge_hashtag_to_media?.edges ||
+            data.data?.recent?.sections?.flatMap(
+              (s) => (s.layout_content?.medias || []).map((m) => ({ node: m.media }))
+            ) ||
+            [];
+          return edges
+            .map((edge) => ({
+              shortcode: edge.node?.shortcode || edge.node?.code,
+              id: edge.node?.id || edge.node?.pk?.toString(),
+              commentCount: edge.node?.edge_media_to_comment?.count || edge.node?.comment_count || 0,
+            }))
+            .filter((p) => p.shortcode);
+        } catch {
+          return [];
+        }
+      },
+      hashtag,
+      appId
+    );
+
+    // GraphQL fallback for hashtags
+    if (posts.length === 0) {
+      posts = await this._fetchHashtagPostsGraphQL(page, hashtag);
+    }
+
+    // DOM fallback
+    if (posts.length === 0) {
+      return this._scrapeHashtagDOM(page, hashtag, brandName);
+    }
+
+    logger.info(`[IG-API] ${posts.length} posts for #${hashtag}`);
+    posts.sort((a, b) => b.commentCount - a.commentCount);
+
+    const customers = [];
+    for (const post of posts.slice(0, 8)) {
+      if (post.commentCount === 0) continue;
+      try {
+        const { commenters } = await this._fetchPostCommenters(page, post, '', brandName);
+        customers.push(...commenters);
+      } catch {}
+      await delay(1500 + Math.random() * 2500);
+    }
+
+    return customers;
+  }
+
+  async _fetchHashtagPostsGraphQL(page, hashtag) {
+    const appId = this.IG_APP_ID;
+    return page.evaluate(
+      async (hashtag, appId) => {
+        const hashes = [
+          '174a21c41c5b3b30c84f4a9189e13e8b',
+          'f92f56d47dc7a55b606908374b43a314',
+        ];
+        for (const hash of hashes) {
+          try {
+            const variables = JSON.stringify({ tag_name: hashtag, first: 20 });
+            const resp = await fetch(
+              `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(variables)}`,
+              {
+                headers: {
+                  'x-ig-app-id': appId,
+                  'x-requested-with': 'XMLHttpRequest',
+                },
+                credentials: 'include',
+              }
+            );
+            if (!resp.ok) continue;
+            const data = await resp.json();
+            const edges = data.data?.hashtag?.edge_hashtag_to_media?.edges || [];
+            if (edges.length > 0) {
+              return edges.map((edge) => ({
+                shortcode: edge.node.shortcode,
+                id: edge.node.id,
+                commentCount: edge.node.edge_media_to_comment?.count || 0,
+              }));
+            }
+          } catch {}
+        }
+        return [];
+      },
+      hashtag,
+      appId
+    );
+  }
+
+  /* ================================================================
+     DOM Fallbacks
+     ================================================================ */
+
+  async _scrapeProfileDOM(page, username, brandName) {
+    logger.info(`[IG-DOM] DOM fallback for @${username}`);
+    try {
+      await page.goto(`https://www.instagram.com/${username}/`, {
+        waitUntil: 'networkidle2',
+        timeout: 30000,
+      });
       await delay(2000 + Math.random() * 2000);
 
-      // Check if we hit a login wall
       const content = await page.content();
-      if (content.includes('Log in') && content.includes('Sign up') && !content.includes('/p/')) {
-        logger.info(`[IG-Puppeteer] Login wall for #${hashtag}, trying to extract what we can...`);
+      if (content.includes('Page Not Found') || content.includes("this page isn't available")) {
+        logger.warn(`[IG-DOM] @${username} not found`);
+        return [];
       }
 
-      // Extract post shortcodes
-      const shortcodes = await this._extractShortcodes(page);
-      if (shortcodes.length === 0) {
-        const jsonShortcodes = await this._extractShortcodesFromSource(page);
-        shortcodes.push(...jsonShortcodes);
-      }
+      const shortcodes = await this._extractShortcodesFromPage(page);
+      logger.info(`[IG-DOM] ${shortcodes.length} posts for @${username}`);
 
-      logger.info(`[IG-Puppeteer] Found ${shortcodes.length} posts for #${hashtag}`);
-      const postsToCheck = shortcodes.slice(0, this.MAX_POSTS);
       const customers = [];
-
-      for (const shortcode of postsToCheck) {
+      for (const shortcode of shortcodes.slice(0, this.MAX_POSTS)) {
         try {
-          const postCustomers = await this._scrapePostComments(page, shortcode, '', brandName);
-          customers.push(...postCustomers);
-        } catch (err) {
-          logger.debug(`[IG-Puppeteer] Error on hashtag post ${shortcode}: ${err.message}`);
-        }
+          const post = { shortcode, id: null, commentCount: 1 };
+          const { commenters } = await this._fetchPostCommenters(page, post, username, brandName);
+          customers.push(...commenters);
+        } catch {}
         await delay(1500 + Math.random() * 2500);
       }
 
-      await browser.close();
       return customers;
     } catch (err) {
-      logger.warn(`[IG-Puppeteer] Hashtag scrape failed for #${hashtag}: ${err.message}`);
-      if (browser) await browser.close().catch(() => {});
+      logger.warn(`[IG-DOM] Failed for @${username}: ${err.message}`);
+      return [];
+    }
+  }
+
+  async _scrapeHashtagDOM(page, hashtag, brandName) {
+    logger.info(`[IG-DOM] DOM fallback for #${hashtag}`);
+    try {
+      await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, {
+        waitUntil: 'networkidle2',
+        timeout: 30000,
+      });
+      await delay(2000 + Math.random() * 2000);
+
+      const shortcodes = await this._extractShortcodesFromPage(page);
+      logger.info(`[IG-DOM] ${shortcodes.length} posts for #${hashtag}`);
+
+      const customers = [];
+      for (const shortcode of shortcodes.slice(0, 8)) {
+        try {
+          const post = { shortcode, id: null, commentCount: 1 };
+          const { commenters } = await this._fetchPostCommenters(page, post, '', brandName);
+          customers.push(...commenters);
+        } catch {}
+        await delay(1500 + Math.random() * 2500);
+      }
+
+      return customers;
+    } catch (err) {
+      logger.warn(`[IG-DOM] Failed for #${hashtag}: ${err.message}`);
+      return [];
+    }
+  }
+
+  async _extractShortcodesFromPage(page) {
+    try {
+      const domCodes = await page.evaluate(() => {
+        const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+        const codes = [];
+        links.forEach((link) => {
+          const match = (link.getAttribute('href') || '').match(/\/(p|reel)\/([A-Za-z0-9_-]+)/);
+          if (match && match[2] && !codes.includes(match[2])) codes.push(match[2]);
+        });
+        return codes;
+      });
+
+      const html = await page.content();
+      const srcCodes = [];
+      for (const pattern of [
+        /"shortcode"\s*:\s*"([A-Za-z0-9_-]+)"/g,
+        /\/p\/([A-Za-z0-9_-]+)\//g,
+        /\/reel\/([A-Za-z0-9_-]+)\//g,
+      ]) {
+        let m;
+        while ((m = pattern.exec(html)) !== null) {
+          if (m[1] && m[1].length > 5 && !domCodes.includes(m[1]) && !srcCodes.includes(m[1])) {
+            srcCodes.push(m[1]);
+          }
+        }
+      }
+
+      return [...domCodes, ...srcCodes];
+    } catch {
       return [];
     }
   }
 
   /* ================================================================
-     Apify fallback (last resort when Puppeteer gets 0)
+     Username validation
      ================================================================ */
 
-  async _apifyProfileFallback(username, brandName) {
-    if (!this.apifyClient) return [];
-    logger.info(`[IG-Apify] Falling back to Apify for @${username}`);
-    try {
-      const run = await this.apifyClient.actor('apify/instagram-profile-scraper').call({
-        usernames: [username],
-        resultsLimit: 20,
-      });
-      const { items } = await this.apifyClient.dataset(run.defaultDatasetId).listItems();
-      return (items || [])
-        .filter((item) => item.ownerUsername && item.ownerUsername !== username)
-        .map((item) =>
-          createCustomerRecord({
-            name: item.ownerFullName || item.ownerUsername,
-            username: item.ownerUsername,
-            profileUrl: `https://www.instagram.com/${item.ownerUsername}/`,
-            source: 'instagram',
-            brand: brandName,
-            comment: item.text || null,
-          })
-        );
-    } catch (err) {
-      logger.warn(`[IG-Apify] Fallback failed: ${err.message}`);
-      return [];
-    }
+  _isValidUsername(username) {
+    if (!username) return false;
+    if (!/^[a-zA-Z0-9._]{1,30}$/.test(username)) return false;
+
+    const blocklist = new Set([
+      'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+      'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+      'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+      'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+      'facebook', 'meta', 'threads', 'whatsapp',
+    ]);
+
+    return !blocklist.has(username.toLowerCase());
   }
 
   /* ================================================================
-     Custom Instagram scraping (single username, used by API)
+     Custom scraping (single handle, used by API route)
      ================================================================ */
 
   async scrapeCustom(username) {
     logger.info(`[Instagram] Custom scrape for @${username}`);
-    const customers = await this._scrapeProfile(username, 'Custom');
-    return customers;
+    let browser;
+    try {
+      browser = await this._launchBrowser();
+      const page = await browser.newPage();
+      await this._initSession(page);
+      const customers = await this._scrapeProfileViaAPI(page, username, 'Custom');
+      await browser.close();
+      return customers;
+    } catch (err) {
+      logger.warn(`[Instagram] Custom scrape failed: ${err.message}`);
+      if (browser) await browser.close().catch(() => {});
+      return [];
+    }
   }
 }
 
