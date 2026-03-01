@@ -265,8 +265,10 @@
 
     const log = $('#progressLog');
     const bar = $('#progressBar');
+    const scrapeBtn = $('#btnScrape');
     log.innerHTML = '';
     bar.style.width = '0%';
+    scrapeBtn.disabled = true;
 
     addLog(log, `Starting scrape for ${brand}...`, 'info');
     addLog(log, `Sources: ${sources.join(', ')}`, 'info');
@@ -274,14 +276,19 @@
     bar.style.width = '10%';
 
     try {
-      const res = await fetch('/api/scrape-sync', {
+      const res = await fetch('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ brand, sources }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
 
-      bar.style.width = '100%';
+      if (!res.ok) {
+        const message = data?.error || `Request failed (${res.status})`;
+        addLog(log, `Error: ${message}`, 'error');
+        showToast(message, 'error');
+        return;
+      }
 
       if (!data.success) {
         addLog(log, `Error: ${data.error}`, 'error');
@@ -289,36 +296,77 @@
         return;
       }
 
-      // Log source progress
-      if (data.sources) {
-        Object.entries(data.sources).forEach(([src, info]) => {
-          let statusText, foundCount;
-          if (typeof info === 'object' && info !== null) {
-            statusText = info.status || 'unknown';
-            foundCount = info.found || 0;
-          } else {
-            statusText = String(info);
-            foundCount = 0;
-          }
-          const logType = statusText === 'completed' ? 'success' : statusText === 'failed' ? 'error' : 'info';
-          addLog(log, `${src}: ${statusText} — ${foundCount} found`, logType);
-        });
+      bar.style.width = '25%';
+      addLog(log, 'Scrape job started. Waiting for completion...', 'info');
+      const finalData = await waitForBrandCompletion(brand, log, bar);
+
+      if (!finalData) {
+        addLog(log, 'Timed out waiting for completion. Open Results tab to check saved output.', 'error');
+        showToast('Scrape is taking longer than expected. Check Results tab.', 'error');
+        return;
       }
 
-      if (data.errors && data.errors.length) {
-        data.errors.forEach((e) => addLog(log, `Warning: ${e}`, 'error'));
-      }
+      bar.style.width = '100%';
+      addLog(log, `Completed — ${finalData.totalCustomers || finalData.customers?.length || 0} unique customers found`, 'success');
+      showToast(`Found ${finalData.totalCustomers || finalData.customers?.length || 0} unique customers`, 'success');
 
-      addLog(log, `Completed — ${data.totalUnique} unique customers found`, 'success');
-      showToast(`Found ${data.totalUnique} unique customers for ${data.brand}`, 'success');
-
-      // Show results
-      displayResults(data, '#resultsSummary', '#resultsTable', '#scrapeResults');
+      displayResults(
+        {
+          brand: finalData.brand,
+          customers: finalData.customers || [],
+          totalUnique: finalData.totalCustomers || finalData.customers?.length || 0,
+        },
+        '#resultsSummary',
+        '#resultsTable',
+        '#scrapeResults'
+      );
       checkStatus();
     } catch (err) {
       addLog(log, `Request failed: ${err.message}`, 'error');
       showToast('Scrape failed: ' + err.message, 'error');
+    } finally {
+      scrapeBtn.disabled = false;
     }
+  }
+
+  async function waitForBrandCompletion(brandSlug, log, bar) {
+    const maxChecks = 180; // ~15 minutes at 5s interval
+
+    for (let i = 1; i <= maxChecks; i++) {
+      await sleep(5000);
+
+      try {
+        const jobsRes = await fetch('/api/jobs');
+        const jobsData = await parseJsonResponse(jobsRes);
+        if (!jobsRes.ok || !jobsData?.success) continue;
+
+        const brandJobs = (jobsData.jobs || [])
+          .filter((j) => j.brandSlug === brandSlug)
+          .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
+
+        const latest = brandJobs[0];
+        if (!latest) continue;
+
+        const pct = Math.min(25 + i, 95);
+        bar.style.width = `${pct}%`;
+
+        if (latest.status === 'completed') {
+          const resultsRes = await fetch(`/api/results/${brandSlug}`);
+          const resultsData = await parseJsonResponse(resultsRes);
+          if (resultsRes.ok && resultsData?.success) return resultsData;
+          return { brand: latest.brand, customers: [], totalCustomers: latest.totalUnique || 0 };
+        }
+
+        if (latest.status === 'failed') {
+          addLog(log, `Scrape failed for ${brandSlug}.`, 'error');
+          return null;
+        }
+      } catch {
+        // keep polling
+      }
+    }
+
+    return null;
   }
 
   // ── Scrape All ──────────────────────────────────────────────
@@ -339,7 +387,14 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
+
+      if (!res.ok) {
+        const message = data?.error || `Failed to start (${res.status})`;
+        addLog(log, message, 'error');
+        showToast(message, 'error');
+        return;
+      }
 
       bar.style.width = '30%';
       addLog(log, `Scraping started for: ${data.brands.join(', ')}`, 'info');
@@ -361,7 +416,8 @@
       ticks++;
       try {
         const res = await fetch('/api/status');
-        const data = await res.json();
+        const data = await parseJsonResponse(res);
+        if (!res.ok || !data?.success) continue;
         const s = data.status;
         const pct = Math.min(30 + ticks * 2, 95);
         bar.style.width = `${pct}%`;
@@ -579,5 +635,15 @@
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function parseJsonResponse(res) {
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Invalid server response (${res.status}). The service may have restarted; please retry.`);
+    }
   }
 })();

@@ -11,6 +11,12 @@ const path = require('path');
 function createApiRouter(orchestrator) {
   const router = express.Router();
 
+  const getRunningJob = () =>
+    orchestrator
+      .getAllJobs()
+      .filter((j) => j.status === 'running')
+      .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))[0] || null;
+
   // ============================================================
   // GET /api/brands - List all configured brands
   // ============================================================
@@ -30,6 +36,20 @@ function createApiRouter(orchestrator) {
   router.post('/scrape', async (req, res) => {
     const { brand } = req.body;
     const sources = ['instagram'];
+
+    const runningJob = getRunningJob();
+    if (runningJob) {
+      return res.status(409).json({
+        success: false,
+        error: `Another scrape is already running for ${runningJob.brand}. Please wait for it to finish.`,
+        runningJob: {
+          id: runningJob.id,
+          brand: runningJob.brand,
+          brandSlug: runningJob.brandSlug,
+          startedAt: runningJob.startedAt,
+        },
+      });
+    }
 
     if (!brand) {
       return res.status(400).json({ success: false, error: 'Brand slug is required' });
@@ -68,6 +88,20 @@ function createApiRouter(orchestrator) {
     const { brand } = req.body;
     const sources = ['instagram'];
 
+    const runningJob = getRunningJob();
+    if (runningJob) {
+      return res.status(409).json({
+        success: false,
+        error: `Another scrape is already running for ${runningJob.brand}. Please wait for it to finish.`,
+        runningJob: {
+          id: runningJob.id,
+          brand: runningJob.brand,
+          brandSlug: runningJob.brandSlug,
+          startedAt: runningJob.startedAt,
+        },
+      });
+    }
+
     if (!brand) {
       return res.status(400).json({ success: false, error: 'Brand slug is required' });
     }
@@ -103,6 +137,20 @@ function createApiRouter(orchestrator) {
   // POST /api/scrape-all - Scrape all brands
   // ============================================================
   router.post('/scrape-all', async (req, res) => {
+    const runningJob = getRunningJob();
+    if (runningJob) {
+      return res.status(409).json({
+        success: false,
+        error: `Another scrape is already running for ${runningJob.brand}. Please wait for it to finish.`,
+        runningJob: {
+          id: runningJob.id,
+          brand: runningJob.brand,
+          brandSlug: runningJob.brandSlug,
+          startedAt: runningJob.startedAt,
+        },
+      });
+    }
+
     res.json({
       success: true,
       message: 'Scraping all brands started',
@@ -182,6 +230,7 @@ function createApiRouter(orchestrator) {
     const jobs = orchestrator.getAllJobs().map((j) => ({
       id: j.id,
       brand: j.brand,
+      brandSlug: j.brandSlug,
       status: j.status,
       startedAt: j.startedAt,
       completedAt: j.completedAt,
