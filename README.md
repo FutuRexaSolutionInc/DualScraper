@@ -210,3 +210,54 @@ Edit `src/config/brands.js` to add new brands:
 ## License
 
 ISC
+
+## Deploy on Render (Frontend + Backend Together)
+
+This project can run as a **single Render Web Service** because Express serves both API and frontend from `public/`.
+
+### 1) Push latest code to GitHub
+
+Make sure these files are in your repo:
+
+- `Dockerfile`
+- `render.yaml`
+
+### 2) Create Web Service on Render
+
+1. Log in to Render
+2. Click **New +** → **Blueprint** (recommended)
+3. Connect your GitHub repo: `FutuRexaSolutionInc/DualScraper`
+4. Render will auto-detect `render.yaml`
+5. Click **Apply** to create the service
+
+> If you use **Web Service** instead of Blueprint, select **Docker** environment manually.
+
+### 3) Environment Variables
+
+Set (or confirm) these in Render service settings:
+
+- `NODE_ENV=production`
+- `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` (already set in Dockerfile, but safe to keep explicit)
+
+### 4) Deploy
+
+Render will build Docker image and start:
+
+- Command: `node server.js`
+- Port: Render injects `PORT` automatically
+
+### 5) Verify
+
+After deploy completes, open:
+
+- `https://<your-render-service>.onrender.com`
+
+Then verify:
+
+- `https://<your-render-service>.onrender.com/api/status`
+- Start one brand scrape from dashboard to confirm Puppeteer works in cloud
+
+### Notes
+
+- Free Render instances can sleep when idle and may start slowly.
+- Instagram may rate-limit cloud IPs, so scrape in moderate batches.

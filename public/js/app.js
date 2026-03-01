@@ -225,8 +225,9 @@
       }
 
       container.innerHTML = data.exports
-        .map((f) => {
-          const ext = f.split('.').pop();
+        .map((file) => {
+          const filename = typeof file === 'string' ? file : file.filename;
+          const ext = (filename || '').split('.').pop();
           const isJson = ext === 'json';
           return `
             <div class="export-item">
@@ -234,9 +235,9 @@
                 <div class="export-icon ${isJson ? 'json' : 'csv'}">
                   ${icon('fileDoc')}
                 </div>
-                <span class="export-name">${f}</span>
+                <span class="export-name">${filename}</span>
               </div>
-              <a href="/api/download/${f}" class="btn btn-sm btn-success" download>
+              <a href="/api/download/${filename}" class="btn btn-sm btn-success" download>
                 ${icon('download', 'btn-icon')} Download
               </a>
             </div>`;
@@ -269,6 +270,7 @@
 
     addLog(log, `Starting scrape for ${brand}...`, 'info');
     addLog(log, `Sources: ${sources.join(', ')}`, 'info');
+    addLog(log, 'This can take 2-15 minutes for large brands while Instagram pages are processed.', 'info');
     bar.style.width = '10%';
 
     try {
@@ -453,7 +455,7 @@
 
     let summaryHtml = `<span class="summary-badge">${icon('users', 'btn-icon')} ${customers.length} unique customers</span>`;
     Object.entries(sources).forEach(([src, count]) => {
-      const srcIcon = src === 'website' ? 'globe' : src === 'instagram' ? 'instagram' : 'facebook';
+      const srcIcon = 'instagram';
       summaryHtml += `<span class="summary-badge">${icon(srcIcon, 'btn-icon')} ${count} from ${src}</span>`;
     });
     summary.innerHTML = summaryHtml;
@@ -490,18 +492,19 @@
           <tbody>`;
 
     page.forEach((c, i) => {
-      const srcClass = 'instagram';
       const profileHtml = c.profileUrl
         ? `<a href="${c.profileUrl}" target="_blank" class="profile-link">${icon('externalLink', 'btn-icon')} View</a>`
         : '—';
+      const engagementType = c.engagement?.type || c.engagementType || '—';
+      const content = c.comment || c.content || '—';
 
       html += `
             <tr>
               <td>${start + i + 1}</td>
               <td><strong>${escHtml(c.name || c.username || 'Unknown')}</strong></td>
               <td><span class="source-badge instagram">${icon('instagram')} instagram</span></td>
-              <td>${escHtml(c.engagementType || '—')}</td>
-              <td title="${escHtml(c.content || '')}">${truncate(c.content || '—', 60)}</td>
+              <td>${escHtml(engagementType)}</td>
+              <td title="${escHtml(content)}">${truncate(content, 60)}</td>
               <td>${profileHtml}</td>
             </tr>`;
     });
