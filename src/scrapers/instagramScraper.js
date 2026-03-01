@@ -19,10 +19,12 @@ puppeteer.use(StealthPlugin());
  */
 class InstagramScraper {
   constructor() {
-    this.MAX_POSTS = 15;                // max posts to scrape per profile
-    this.MAX_COMMENTS_PER_POST = 200;   // max comments per post (paginated)
+    const isProduction = process.env.NODE_ENV === 'production';
+    this.MAX_POSTS = isProduction ? 8 : 15;                // fewer posts in prod to save memory/time
+    this.MAX_COMMENTS_PER_POST = isProduction ? 80 : 200;  // fewer comments in prod
     this.IG_APP_ID = '936619743392459'; // Instagram's public web app ID
     this.BROWSER_PATH = this._findBrowser();
+    this.isProduction = isProduction;
   }
 
   /* ================================================================
@@ -60,11 +62,30 @@ class InstagramScraper {
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
         '--lang=en-US,en',
+        // ── Memory-saving flags (critical for 512MB environments) ──
+        '--single-process',               // run browser in one process (~150MB saved)
+        '--no-zygote',                     // skip zygote process
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-ipc-flooding-protection',
+        '--disable-hang-monitor',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-first-run',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
+        '--js-flags=--max-old-space-size=128',  // limit Chromium V8 heap
+        '--window-size=800,600',
       ],
-      defaultViewport: { width: 1920, height: 1080 },
+      defaultViewport: { width: 800, height: 600 },
     };
     if (this.BROWSER_PATH) {
       launchOpts.executablePath = this.BROWSER_PATH;
@@ -89,8 +110,14 @@ class InstagramScraper {
 
     let browser;
     try {
+      const memBefore = Math.round(process.memoryUsage().rss / 1024 / 1024);
+      logger.info(`[Instagram] Memory before browser launch: ${memBefore}MB`);
+
       browser = await this._launchBrowser();
       const page = await browser.newPage();
+
+      const memAfter = Math.round(process.memoryUsage().rss / 1024 / 1024);
+      logger.info(`[Instagram] Memory after browser launch: ${memAfter}MB (+${memAfter - memBefore}MB)`);
 
       // Establish session (cookies, CSRF token)
       await this._initSession(page);
@@ -104,6 +131,12 @@ class InstagramScraper {
         } catch (err) {
           logger.warn(`[Instagram] Error scraping @${handle}: ${err.message}`);
         }
+        // Clear caches between profiles to reclaim memory
+        try {
+          const client = await page.createCDPSession();
+          await client.send('Network.clearBrowserCache');
+          await client.detach();
+        } catch {}
         await delay(3000 + Math.random() * 4000);
       }
 
@@ -145,11 +178,22 @@ class InstagramScraper {
   async _initSession(page) {
     logger.info('[IG-Session] Establishing Instagram session...');
 
+    // ── Block heavy resources to save memory ──
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const type = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'texttrack', 'eventsource'].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
     // Visit homepage to get cookies (csrftoken, ig_did, mid)
     await page.goto('https://www.instagram.com/', {
-      waitUntil: 'networkidle2',
+      waitUntil: 'domcontentloaded',
       timeout: 45000,
     });
     await delay(3000 + Math.random() * 2000);
@@ -183,6 +227,11 @@ class InstagramScraper {
     const cookies = await page.cookies();
     const hasCsrf = cookies.some((c) => c.name === 'csrftoken');
     logger.info(`[IG-Session] Session ready — CSRF: ${hasCsrf ? 'YES' : 'NO'}, Cookies: ${cookies.length}`);
+
+    // Clear navigation memory before scraping
+    await page.evaluate(() => {
+      if (window.gc) window.gc();
+    });
   }
 
   /* ================================================================
@@ -656,7 +705,7 @@ class InstagramScraper {
 
     try {
       await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
       await delay(3000);
@@ -692,7 +741,7 @@ class InstagramScraper {
   async _fetchCommentsDOMFallback(page, shortcode, profileUsername) {
     try {
       await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
       await delay(2000);
@@ -866,7 +915,7 @@ class InstagramScraper {
     logger.info(`[IG-DOM] DOM fallback for @${username}`);
     try {
       await page.goto(`https://www.instagram.com/${username}/`, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
       await delay(2000 + Math.random() * 2000);
@@ -901,7 +950,7 @@ class InstagramScraper {
     logger.info(`[IG-DOM] DOM fallback for #${hashtag}`);
     try {
       await page.goto(`https://www.instagram.com/explore/tags/${hashtag}/`, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
       await delay(2000 + Math.random() * 2000);
@@ -986,6 +1035,9 @@ class InstagramScraper {
     logger.info(`[Instagram] Custom scrape for @${username}`);
     let browser;
     try {
+      const memBefore = Math.round(process.memoryUsage().rss / 1024 / 1024);
+      logger.info(`[Instagram] Memory before browser launch: ${memBefore}MB`);
+
       browser = await this._launchBrowser();
       const page = await browser.newPage();
       await this._initSession(page);

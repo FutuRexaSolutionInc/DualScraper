@@ -7,3 +7,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: MEMORY_LIMIT_MB
+        value: '450'

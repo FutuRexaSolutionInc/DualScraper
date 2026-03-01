@@ -250,6 +250,7 @@ function createApiRouter(orchestrator) {
     const running = jobs.filter((j) => j.status === 'running').length;
     const completed = jobs.filter((j) => j.status === 'completed').length;
     const exports = listExports();
+    const mem = process.memoryUsage();
 
     res.json({
       success: true,
@@ -259,6 +260,12 @@ function createApiRouter(orchestrator) {
         completedJobs: completed,
         totalExports: exports.length,
         configuredBrands: getAllBrands().length,
+        memory: {
+          rssMB: Math.round(mem.rss / 1024 / 1024),
+          heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+          externalMB: Math.round(mem.external / 1024 / 1024),
+        },
       },
     });
   });

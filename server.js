@@ -13,6 +13,23 @@ const createApiRouter = require('./src/routes/api');
 // ============================================================
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost');
+const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB || '450', 10);
+
+// Log memory usage every 60s in production
+if (process.env.NODE_ENV === 'production') {
+  setInterval(() => {
+    const mem = process.memoryUsage();
+    const heapMB = Math.round(mem.heapUsed / 1024 / 1024);
+    const rssMB = Math.round(mem.rss / 1024 / 1024);
+    logger.info(`[Memory] RSS: ${rssMB}MB | Heap: ${heapMB}MB | External: ${Math.round(mem.external / 1024 / 1024)}MB`);
+
+    // Emergency GC if approaching limit
+    if (rssMB > MEMORY_LIMIT_MB && global.gc) {
+      logger.warn(`[Memory] RSS ${rssMB}MB exceeds ${MEMORY_LIMIT_MB}MB limit — forcing GC`);
+      global.gc();
+    }
+  }, 60000);
+}
 
 // Ensure required directories exist
 const dirs = ['data', 'logs'];

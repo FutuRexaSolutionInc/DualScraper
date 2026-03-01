@@ -106,6 +106,12 @@ class ScraperOrchestrator {
           error: error.message,
         });
       }
+
+      // Force garbage collection between brands to reclaim memory
+      if (global.gc) {
+        global.gc();
+        logger.info(`[Memory] GC after ${brand.name} — heap: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+      }
     }
 
     return results;

@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim
 ENV NODE_ENV=production
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+# Install only essential Chromium dependencies (minimal set)
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
   chromium \
@@ -29,15 +30,18 @@ RUN apt-get update \
   libxkbcommon0 \
   libxrandr2 \
   xdg-utils \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /tmp/* /var/tmp/*
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 
 EXPOSE 10000
 
-CMD ["node", "server.js"]
+# --max-old-space-size=384  → cap Node.js heap (leave ~128MB for Chromium overhead)
+# --expose-gc              → allow manual GC calls between brand scrapes
+CMD ["node", "--max-old-space-size=384", "--expose-gc", "server.js"]
