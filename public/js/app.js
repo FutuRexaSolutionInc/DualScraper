@@ -76,6 +76,7 @@
     $('#btnScrapeIg').addEventListener('click', scrapeCustomInstagram);
     $('#btnLoadResults').addEventListener('click', loadSavedResults);
     $('#btnIgConnect').addEventListener('click', connectIgSession);
+    $('#btnIgPasteSession').addEventListener('click', connectIgWithCookie);
     $('#btnDashIgDisconnect').addEventListener('click', disconnectIgSession);
     $('#btnScrapeFollowers').addEventListener('click', scrapeFollowers);
     $('#btnScrapeFollowing').addEventListener('click', scrapeFollowing);
@@ -230,7 +231,7 @@
     btn.textContent = 'Opening browser...';
 
     try {
-      showToast('A browser window will open — please log in to Instagram there.', 'info');
+      showToast('Attempting to open browser for Instagram login...', 'info');
 
       const res = await fetch('/api/ig-login', {
         method: 'POST',
@@ -239,7 +240,12 @@
       const data = await res.json();
 
       if (!data.success) {
-        showToast(data.error, 'error');
+        // If headless server error, guide user to cookie method
+        if (data.error && (data.error.includes('X server') || data.error.includes('headful') || data.error.includes('deployed'))) {
+          showToast('Browser login not available on this server. Please paste your session cookie below instead.', 'error');
+        } else {
+          showToast(data.error, 'error');
+        }
         return;
       }
 
@@ -252,6 +258,45 @@
     } finally {
       btn.disabled = false;
       btn.innerHTML = `<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Open Instagram Login`;
+    }
+  }
+
+  // ── Connect Instagram with Session Cookie ─────────────────
+  async function connectIgWithCookie() {
+    const input = $('#igSessionInput');
+    const sessionId = (input.value || '').trim();
+    if (!sessionId || sessionId.length < 10) {
+      showToast('Please paste a valid sessionid cookie value', 'error');
+      return;
+    }
+
+    const btn = $('#btnIgPasteSession');
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+
+    try {
+      const res = await fetch('/api/ig-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        showToast(data.error, 'error');
+        return;
+      }
+
+      showToast('Instagram connected via session cookie!', 'success');
+      input.value = '';
+      $('#igLoginModal').classList.add('hidden');
+      updateIgAuthUI(true);
+      renderBrandCards();
+    } catch (err) {
+      showToast('Failed to connect: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = `<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg> Connect with Session Cookie`;
     }
   }
 

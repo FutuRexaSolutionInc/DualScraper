@@ -137,6 +137,15 @@ class InstagramScraper {
       logger.error(`[IG-Login] Error: ${err.message}`);
       if (browser) await browser.close().catch(() => {});
       this._loginBrowser = null;
+
+      // Provide a clear message for headless server environments
+      if (err.message.includes('X server') || err.message.includes('headful')) {
+        return {
+          success: false,
+          message: 'Browser login is not available on deployed servers (no display). Please use the session cookie method instead: log in to Instagram in your own browser, copy the "sessionid" cookie from DevTools, and paste it in the Connect dialog.',
+        };
+      }
+
       return { success: false, message: `Login error: ${err.message}` };
     }
   }

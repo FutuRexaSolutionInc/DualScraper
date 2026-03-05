@@ -90,15 +90,38 @@
               <svg class="ig-session-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
               Connect Instagram
             </h3>
-            <p class="ig-session-desc">A browser window will open where you can log in to Instagram yourself. Once you're logged in, the window will close automatically and your session will be connected.</p>
-            <p class="ig-session-desc" style="font-size:0.85em;opacity:0.7;">Without connecting, comments, tags &amp; mentions are still extracted normally.</p>
-            <div class="form-actions">
-              <button id="btnIgConnect" class="btn btn-primary">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
-                Open Instagram Login
-              </button>
-              <button class="btn btn-outline" onclick="document.getElementById('igLoginModal').classList.add('hidden')">Cancel</button>
+
+            <!-- Method 1: Browser Login (local only) -->
+            <div id="igMethodBrowser">
+              <p class="ig-session-desc">A browser window will open where you can log in to Instagram yourself. Once you're logged in, the window will close automatically.</p>
+              <div class="form-actions">
+                <button id="btnIgConnect" class="btn btn-primary">
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                  Open Instagram Login
+                </button>
+              </div>
+              <p class="ig-session-desc" style="margin-top:12px;font-size:0.85em;opacity:0.7;">Or paste your session cookie below:</p>
             </div>
+
+            <!-- Method 2: Session Cookie Paste (works everywhere) -->
+            <div id="igMethodCookie" style="margin-top:8px;">
+              <p class="ig-session-desc" style="font-size:0.85em;">
+                <strong>How to get your session cookie:</strong><br>
+                1. Open Instagram in your browser &amp; log in<br>
+                2. Press F12 → Application → Cookies → instagram.com<br>
+                3. Copy the <code>sessionid</code> value and paste it below
+              </p>
+              <input type="text" id="igSessionInput" class="form-control" placeholder="Paste your sessionid cookie here..." style="width:100%;margin:8px 0;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.9em;">
+              <div class="form-actions">
+                <button id="btnIgPasteSession" class="btn btn-primary">
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+                  Connect with Session Cookie
+                </button>
+                <button class="btn btn-outline" onclick="document.getElementById('igLoginModal').classList.add('hidden')">Cancel</button>
+              </div>
+            </div>
+
+            <p class="ig-session-desc" style="font-size:0.85em;opacity:0.7;margin-top:10px;">Without connecting, comments, tags &amp; mentions are still extracted normally.</p>
           </div>
         </div>
 
