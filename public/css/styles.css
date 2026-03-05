@@ -712,6 +712,8 @@ select.form-control {
 }
 .comment-badge { background: rgba(99,102,241,.12); color: var(--accent); }
 .like-badge    { background: rgba(239,68,68,.12);   color: #f87171; }
+.follower-badge { background: rgba(52,211,153,.12); color: var(--green); }
+.following-badge { background: rgba(251,191,36,.12); color: var(--amber); }
 
 .profile-link {
   color: var(--accent);
@@ -895,6 +897,189 @@ select.form-control {
    Hidden Utility
    ============================================================ */
 .hidden { display: none !important; }
+
+/* ============================================================
+   Instagram Session Card
+   ============================================================ */
+.ig-session-card {
+  margin-bottom: 16px;
+  border-color: var(--border);
+}
+
+.ig-session-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+
+.ig-session-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--amber);
+  flex-shrink: 0;
+}
+
+.ig-session-optional {
+  font-size: .78rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.ig-session-desc {
+  font-size: .84rem;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.ig-session-help {
+  font-size: .76rem;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+.ig-session-help code {
+  background: var(--bg-hover);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: .76rem;
+  color: var(--accent);
+}
+
+.ig-connected-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: rgba(52,211,153,.08);
+  border: 1px solid rgba(52,211,153,.2);
+  border-radius: var(--radius);
+  color: var(--green);
+  font-size: .86rem;
+  font-weight: 500;
+  margin-bottom: 14px;
+}
+
+.ig-connected-badge svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* IG Auth Status (sidebar) */
+.ig-auth-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: .76rem;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.ig-auth-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ig-auth-dot.connected {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+/* ============================================================
+   Dashboard Header – Connect Instagram
+   ============================================================ */
+.view-header--dash {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.btn-ig-connect {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-color: var(--accent);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.btn-ig-connect:hover {
+  background: rgba(139, 92, 246, .1);
+}
+
+.btn-ig-disconnect {
+  font-size: .78rem;
+}
+
+.dash-ig-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: .86rem;
+  color: var(--green);
+  font-weight: 500;
+}
+
+/* ── Instagram Login Modal ──────────────────────────────────── */
+.ig-login-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(4px);
+}
+
+.ig-login-modal.hidden {
+  display: none;
+}
+
+.ig-login-modal-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 32px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.4);
+}
+
+.ig-login-modal-content .form-group {
+  margin-bottom: 14px;
+}
+
+.ig-login-modal-content .form-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.ig-toggle-btn {
+  position: relative;
+}
+
+/* Disabled button style */
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn:disabled:hover {
+  box-shadow: none;
+  transform: none;
+}
 
 /* ============================================================
    Scrollbar

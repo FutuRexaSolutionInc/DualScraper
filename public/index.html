@@ -47,6 +47,10 @@
       </nav>
 
       <div class="sidebar-footer">
+        <div id="igAuthStatus" class="ig-auth-status">
+          <span class="ig-auth-dot" id="igAuthDot"></span>
+          <span class="ig-auth-text" id="igAuthText">IG: Not Connected</span>
+        </div>
         <div id="statusIndicator" class="status-indicator">
           <span class="status-dot"></span>
           <span class="status-text">Checking...</span>
@@ -59,10 +63,44 @@
 
       <!-- Dashboard -->
       <section id="view-dashboard" class="view active">
-        <header class="view-header">
-          <h2>Dashboard</h2>
-          <p>Overview of your brand customer scraping operations</p>
+        <header class="view-header view-header--dash">
+          <div>
+            <h2>Dashboard</h2>
+            <p>Overview of your brand customer scraping operations</p>
+          </div>
+          <div id="dashIgConnect">
+            <button id="btnDashIgConnect" class="btn btn-outline btn-ig-connect" onclick="document.getElementById('igLoginModal').classList.remove('hidden')">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+              Connect Instagram
+            </button>
+          </div>
+          <div id="dashIgConnected" class="hidden">
+            <div class="dash-ig-badge">
+              <span class="ig-auth-dot connected"></span>
+              <span>IG Connected</span>
+              <button id="btnDashIgDisconnect" class="btn btn-outline btn-sm btn-ig-disconnect">Disconnect</button>
+            </div>
+          </div>
         </header>
+
+        <!-- Instagram Login Modal -->
+        <div id="igLoginModal" class="ig-login-modal hidden">
+          <div class="ig-login-modal-content">
+            <h3 class="ig-session-title">
+              <svg class="ig-session-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+              Connect Instagram
+            </h3>
+            <p class="ig-session-desc">A browser window will open where you can log in to Instagram yourself. Once you're logged in, the window will close automatically and your session will be connected.</p>
+            <p class="ig-session-desc" style="font-size:0.85em;opacity:0.7;">Without connecting, comments, tags &amp; mentions are still extracted normally.</p>
+            <div class="form-actions">
+              <button id="btnIgConnect" class="btn btn-primary">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                Open Instagram Login
+              </button>
+              <button class="btn btn-outline" onclick="document.getElementById('igLoginModal').classList.add('hidden')">Cancel</button>
+            </div>
+          </div>
+        </div>
 
         <div class="stats-grid">
           <div class="stat-card">
@@ -139,6 +177,11 @@
                 <svg class="cb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
                 <span>Instagram (Comments &amp; Engagement)</span>
               </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="srcFollowers" value="followers">
+                <svg class="cb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                <span>Instagram Followers <small>(requires IG connection)</small></span>
+              </label>
             </div>
           </div>
 
@@ -176,6 +219,7 @@
           <p>Scrape any Instagram handle for customer data</p>
         </header>
 
+        <!-- Custom Scrape Form -->
         <div class="scrape-form">
           <div class="form-group">
             <label for="customIgHandle">Instagram Handle</label>
@@ -188,10 +232,20 @@
             <label for="customIgBrand">Brand Name (optional)</label>
             <input type="text" id="customIgBrand" class="form-control" placeholder="Brand Name">
           </div>
-          <button id="btnScrapeIg" class="btn btn-primary">
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
-            Scrape Instagram
-          </button>
+          <div class="form-actions">
+            <button id="btnScrapeIg" class="btn btn-primary">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1112.63 8 4 4 0 0116 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
+              Scrape Instagram
+            </button>
+            <button id="btnScrapeFollowers" class="btn btn-outline" disabled title="Connect Instagram session to enable">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+              Get Followers
+            </button>
+            <button id="btnScrapeFollowing" class="btn btn-outline" disabled title="Connect Instagram session to enable">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+              Get Following
+            </button>
+          </div>
         </div>
 
         <div id="customResults" class="scrape-results hidden">

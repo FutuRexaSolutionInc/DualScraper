@@ -26,6 +26,119 @@ class InstagramScraper {
     this.BROWSER_PATH = this._findBrowser();
     this.isProduction = isProduction;
     this._discoveredLikers = new Map(); // shortcode -> [{username, fullName}] — likers found during comment extraction
+    this._sessionCookie = null; // Optional Instagram session cookie for authenticated features
+  }
+
+  /* ================================================================
+     Session Cookie Management (optional login)
+     ================================================================ */
+
+  /**
+   * Set the Instagram session cookie for authenticated requests.
+   * This enables follower/following list extraction and full liker lists.
+   * @param {string} sessionId - The sessionid cookie value from browser DevTools
+   */
+  setSessionCookie(sessionId) {
+    if (!sessionId || typeof sessionId !== 'string') {
+      throw new Error('Invalid session ID');
+    }
+    this._sessionCookie = sessionId.trim();
+    logger.info('[IG-Auth] Session cookie set — authenticated features enabled');
+  }
+
+  /**
+   * Clear the session cookie, reverting to unauthenticated mode.
+   */
+  clearSessionCookie() {
+    this._sessionCookie = null;
+    logger.info('[IG-Auth] Session cookie cleared — back to unauthenticated mode');
+  }
+
+  /**
+   * Check if the scraper is in authenticated mode.
+   */
+  isAuthenticated() {
+    return !!this._sessionCookie;
+  }
+
+  /**
+   * Log in to Instagram with username + password via Puppeteer.
+   * Extracts the session cookie on success and stores it.
+   * @param {string} username - Instagram username or email
+   * @param {string} password - Instagram password
+   * @returns {{ success: boolean, message: string }}
+   */
+  /**
+   * Open a visible browser window so the user can log in to Instagram manually.
+   * Polls for the sessionid cookie and returns once detected.
+   * @returns {{ success: boolean, message: string }}
+   */
+  async openLoginBrowser() {
+    logger.info('[IG-Login] Opening Instagram login page for manual login...');
+
+    // Prevent multiple login windows
+    if (this._loginBrowser) {
+      logger.warn('[IG-Login] Login browser already open');
+      return { success: false, message: 'A login window is already open. Please complete login there.' };
+    }
+
+    let browser;
+    try {
+      browser = await this._launchBrowser({ headless: false, forLogin: true });
+      this._loginBrowser = browser;
+      const page = await browser.newPage();
+
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      );
+      await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+      await page.goto('https://www.instagram.com/accounts/login/', {
+        waitUntil: 'networkidle2',
+        timeout: 60000,
+      });
+      logger.info('[IG-Login] Login page opened — waiting for user to log in...');
+
+      // Poll for sessionid cookie (user logs in manually)
+      const maxWaitMs = 180000; // 3 minutes
+      const pollInterval = 2000;
+      const startTime = Date.now();
+
+      while (Date.now() - startTime < maxWaitMs) {
+        // Check if browser was closed by user
+        if (!browser.isConnected()) {
+          this._loginBrowser = null;
+          return { success: false, message: 'Login window was closed before completing login.' };
+        }
+
+        try {
+          const cookies = await page.cookies('https://www.instagram.com');
+          const sessionCookie = cookies.find((c) => c.name === 'sessionid' && c.value);
+          if (sessionCookie) {
+            this._sessionCookie = sessionCookie.value;
+            logger.info('[IG-Login] Session cookie obtained! Closing login window...');
+            await browser.close().catch(() => {});
+            this._loginBrowser = null;
+            return { success: true, message: 'Instagram connected successfully.' };
+          }
+        } catch {
+          // Page might be navigating, ignore
+        }
+
+        await delay(pollInterval);
+      }
+
+      // Timeout
+      await browser.close().catch(() => {});
+      this._loginBrowser = null;
+      logger.warn('[IG-Login] Login timed out after 3 minutes');
+      return { success: false, message: 'Login timed out. Please try again.' };
+    } catch (err) {
+      logger.error(`[IG-Login] Error: ${err.message}`);
+      if (browser) await browser.close().catch(() => {});
+      this._loginBrowser = null;
+      return { success: false, message: `Login error: ${err.message}` };
+    }
   }
 
   /* ================================================================
@@ -54,9 +167,11 @@ class InstagramScraper {
     return undefined;
   }
 
-  async _launchBrowser() {
+  async _launchBrowser(opts = {}) {
+    const isLogin = opts.forLogin || false;
+    const headlessMode = opts.headless !== undefined ? opts.headless : 'new';
     const launchOpts = {
-      headless: 'new',
+      headless: headlessMode,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -65,9 +180,6 @@ class InstagramScraper {
         '--disable-gpu',
         '--disable-blink-features=AutomationControlled',
         '--lang=en-US,en',
-        // ── Memory-saving flags (critical for 512MB environments) ──
-        '--single-process',               // run browser in one process (~150MB saved)
-        '--no-zygote',                     // skip zygote process
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
@@ -83,11 +195,18 @@ class InstagramScraper {
         '--mute-audio',
         '--no-first-run',
         '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
-        '--js-flags=--max-old-space-size=128',  // limit Chromium V8 heap
-        '--window-size=800,600',
+        '--window-size=1280,900',
       ],
-      defaultViewport: { width: 800, height: 600 },
+      defaultViewport: { width: 1280, height: 900 },
     };
+    // Memory-saving flags only for headless/non-login mode
+    if (!isLogin) {
+      launchOpts.args.push(
+        '--single-process',
+        '--no-zygote',
+        '--js-flags=--max-old-space-size=128'
+      );
+    }
     if (this.BROWSER_PATH) {
       launchOpts.executablePath = this.BROWSER_PATH;
     }
@@ -225,11 +344,32 @@ class InstagramScraper {
       }
     } catch {}
 
+    // ── Inject session cookie if provided (optional login) ──
+    if (this._sessionCookie) {
+      await page.setCookie({
+        name: 'sessionid',
+        value: this._sessionCookie,
+        domain: '.instagram.com',
+        path: '/',
+        httpOnly: true,
+        secure: true,
+        sameSite: 'None',
+      });
+      logger.info('[IG-Session] Session cookie injected — authenticated mode');
+
+      // Reload to apply the session cookie
+      await page.goto('https://www.instagram.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 45000,
+      });
+      await delay(2000);
+    }
+
     const cookies = await page.cookies();
     const hasCsrf = cookies.some((c) => c.name === 'csrftoken');
-    logger.info(`[IG-Session] Session ready — CSRF: ${hasCsrf ? 'YES' : 'NO'}, Cookies: ${cookies.length}`);
+    const hasSession = cookies.some((c) => c.name === 'sessionid');
+    logger.info(`[IG-Session] Session ready — CSRF: ${hasCsrf ? 'YES' : 'NO'}, SessionID: ${hasSession ? 'YES' : 'NO'}, Cookies: ${cookies.length}`);
 
-    // ── Login if credentials are provided ──
     // Clear navigation memory before scraping
     await page.evaluate(() => {
       if (window.gc) window.gc();
@@ -885,24 +1025,39 @@ class InstagramScraper {
    */
   async _fetchLikersV1(page, mediaId) {
     const appId = this.IG_APP_ID;
+    const isAuth = this.isAuthenticated();
+    if (isAuth) {
+      logger.debug(`[IG-Likes] Using authenticated likers API for media ${mediaId}`);
+    }
     return page.evaluate(
       async (mediaId, appId) => {
         try {
+          // Get CSRF token from cookie
+          const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
+          const csrfToken = csrfMatch ? csrfMatch[1] : '';
+
+          const headers = {
+            'x-ig-app-id': appId,
+            'x-requested-with': 'XMLHttpRequest',
+          };
+          if (csrfToken) headers['x-csrftoken'] = csrfToken;
+
           const resp = await fetch(`/api/v1/media/${mediaId}/likers/`, {
-            headers: {
-              'x-ig-app-id': appId,
-              'x-requested-with': 'XMLHttpRequest',
-            },
+            headers,
             credentials: 'include',
           });
-          if (!resp.ok) return [];
+          if (!resp.ok) {
+            console.log(`[IG-Likes] V1 likers API returned ${resp.status} for ${mediaId}`);
+            return [];
+          }
           const data = await resp.json();
           const users = data.users || [];
           return users.map((u) => ({
             username: u.username,
             fullName: u.full_name || u.username,
           }));
-        } catch {
+        } catch (e) {
+          console.log(`[IG-Likes] V1 likers API error for ${mediaId}: ${e.message}`);
           return [];
         }
       },
@@ -923,16 +1078,23 @@ class InstagramScraper {
           '97b41c52301f77ce508f55e66d17620e',
           '477b65a610463740ccdb83135b2014db',
         ];
-        const variables = JSON.stringify({ shortcode, first: 1 });
+        // Get CSRF token from cookie
+        const csrfMatch = (document.cookie || '').match(/csrftoken=([^;]+)/);
+        const csrfToken = csrfMatch ? csrfMatch[1] : '';
+
+        const variables = JSON.stringify({ shortcode, first: 50 });
         for (const hash of hashes) {
           try {
+            const headers = {
+              'x-ig-app-id': appId,
+              'x-requested-with': 'XMLHttpRequest',
+            };
+            if (csrfToken) headers['x-csrftoken'] = csrfToken;
+
             const resp = await fetch(
               `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(variables)}`,
               {
-                headers: {
-                  'x-ig-app-id': appId,
-                  'x-requested-with': 'XMLHttpRequest',
-                },
+                headers,
                 credentials: 'include',
               }
             );
@@ -942,17 +1104,25 @@ class InstagramScraper {
             if (!media) continue;
 
             const likers = [];
-            // edge_media_preview_like sometimes has user edges
-            const previewLike = media.edge_media_preview_like || media.edge_liked_by;
-            if (previewLike?.edges) {
-              for (const edge of previewLike.edges) {
-                if (edge.node?.username) {
-                  likers.push({
-                    username: edge.node.username,
-                    fullName: edge.node.full_name || edge.node.username,
-                  });
+            // Check all possible liker edge fields
+            const likerSources = [
+              media.edge_media_preview_like,
+              media.edge_liked_by,
+              media.edge_media_liked_by,
+            ].filter(Boolean);
+
+            for (const src of likerSources) {
+              if (src?.edges) {
+                for (const edge of src.edges) {
+                  if (edge.node?.username) {
+                    likers.push({
+                      username: edge.node.username,
+                      fullName: edge.node.full_name || edge.node.username,
+                    });
+                  }
                 }
               }
+              if (likers.length > 0) break;
             }
             if (likers.length > 0) return likers;
           } catch {}
@@ -2147,6 +2317,244 @@ class InstagramScraper {
     ]);
 
     return !blocklist.has(username.toLowerCase());
+  }
+
+  /* ================================================================
+     Follower / Following extraction (requires authenticated session)
+     ================================================================ */
+
+  /**
+   * Scrape the follower list of an Instagram account.
+   * Requires a session cookie to be set (authenticated mode).
+   * @param {string} username - The Instagram handle to get followers for
+   * @param {string} brandName - Brand name for customer records
+   * @returns {Array} Array of customer records with engagement type 'follower'
+   */
+  async scrapeFollowers(username, brandName) {
+    if (!this._sessionCookie) {
+      throw new Error('Session cookie required. Connect your Instagram account first.');
+    }
+
+    logger.info(`[IG-Followers] Starting follower extraction for @${username}...`);
+    let browser;
+    try {
+      browser = await this._launchBrowser();
+      const page = await browser.newPage();
+      await this._initSession(page);
+
+      // Get user ID from profile info
+      const profileData = await this._fetchProfileInfo(page, username);
+      if (!profileData || !profileData.id) {
+        throw new Error(`Could not fetch profile info for @${username}`);
+      }
+
+      const userId = profileData.id;
+      const followerCount = profileData.edge_followed_by?.count || 0;
+      logger.info(`[IG-Followers] @${username} has ${followerCount} followers, fetching list...`);
+
+      const followers = await this._fetchFollowerList(page, userId, username);
+      logger.info(`[IG-Followers] Fetched ${followers.length} followers for @${username}`);
+
+      await browser.close();
+
+      // Convert to customer records
+      return followers
+        .filter(f => f.username && this._isValidUsername(f.username) && f.username !== username)
+        .map(f => createCustomerRecord({
+          name: f.fullName || f.username,
+          username: f.username,
+          profileUrl: `https://www.instagram.com/${f.username}/`,
+          source: 'instagram',
+          brand: brandName || username,
+          comment: null,
+          engagement: { type: 'follower', postCode: null },
+        }));
+    } catch (err) {
+      logger.error(`[IG-Followers] Failed: ${err.message}`);
+      if (browser) await browser.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
+   * Scrape the following list of an Instagram account.
+   * Requires a session cookie to be set (authenticated mode).
+   * @param {string} username - The Instagram handle to get following for
+   * @param {string} brandName - Brand name for customer records
+   * @returns {Array} Array of customer records with engagement type 'following'
+   */
+  async scrapeFollowing(username, brandName) {
+    if (!this._sessionCookie) {
+      throw new Error('Session cookie required. Connect your Instagram account first.');
+    }
+
+    logger.info(`[IG-Following] Starting following extraction for @${username}...`);
+    let browser;
+    try {
+      browser = await this._launchBrowser();
+      const page = await browser.newPage();
+      await this._initSession(page);
+
+      // Get user ID from profile info
+      const profileData = await this._fetchProfileInfo(page, username);
+      if (!profileData || !profileData.id) {
+        throw new Error(`Could not fetch profile info for @${username}`);
+      }
+
+      const userId = profileData.id;
+      const followingCount = profileData.edge_follow?.count || 0;
+      logger.info(`[IG-Following] @${username} follows ${followingCount} accounts, fetching list...`);
+
+      const following = await this._fetchFollowingList(page, userId, username);
+      logger.info(`[IG-Following] Fetched ${following.length} following for @${username}`);
+
+      await browser.close();
+
+      // Convert to customer records
+      return following
+        .filter(f => f.username && this._isValidUsername(f.username) && f.username !== username)
+        .map(f => createCustomerRecord({
+          name: f.fullName || f.username,
+          username: f.username,
+          profileUrl: `https://www.instagram.com/${f.username}/`,
+          source: 'instagram',
+          brand: brandName || username,
+          comment: null,
+          engagement: { type: 'following', postCode: null },
+        }));
+    } catch (err) {
+      logger.error(`[IG-Following] Failed: ${err.message}`);
+      if (browser) await browser.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
+   * Fetch follower list using Instagram REST API (paginated).
+   * Endpoint: /api/v1/friendships/{userId}/followers/
+   */
+  async _fetchFollowerList(page, userId, username) {
+    const appId = this.IG_APP_ID;
+    const maxUsers = 1000; // Safety limit
+
+    return page.evaluate(
+      async (userId, appId, maxUsers) => {
+        const allUsers = [];
+        let maxId = '';
+        let hasMore = true;
+
+        while (hasMore && allUsers.length < maxUsers) {
+          try {
+            const params = new URLSearchParams({ count: '50', search_surface: 'follow_list_page' });
+            if (maxId) params.set('max_id', maxId);
+
+            const resp = await fetch(`/api/v1/friendships/${userId}/followers/?${params}`, {
+              headers: {
+                'x-ig-app-id': appId,
+                'x-requested-with': 'XMLHttpRequest',
+              },
+              credentials: 'include',
+            });
+
+            if (!resp.ok) {
+              if (resp.status === 401 || resp.status === 403) break; // Auth expired
+              break;
+            }
+
+            const data = await resp.json();
+            const users = data.users || [];
+            if (users.length === 0) break;
+
+            for (const u of users) {
+              if (u.username) {
+                allUsers.push({
+                  username: u.username,
+                  fullName: u.full_name || u.username,
+                });
+              }
+            }
+
+            hasMore = !!data.next_max_id;
+            maxId = data.next_max_id || '';
+            if (!maxId) hasMore = false;
+
+            // Rate limit delay
+            await new Promise(r => setTimeout(r, 1500 + Math.random() * 2000));
+          } catch {
+            break;
+          }
+        }
+
+        return allUsers;
+      },
+      userId,
+      appId,
+      maxUsers
+    );
+  }
+
+  /**
+   * Fetch following list using Instagram REST API (paginated).
+   * Endpoint: /api/v1/friendships/{userId}/following/
+   */
+  async _fetchFollowingList(page, userId, username) {
+    const appId = this.IG_APP_ID;
+    const maxUsers = 1000; // Safety limit
+
+    return page.evaluate(
+      async (userId, appId, maxUsers) => {
+        const allUsers = [];
+        let maxId = '';
+        let hasMore = true;
+
+        while (hasMore && allUsers.length < maxUsers) {
+          try {
+            const params = new URLSearchParams({ count: '50' });
+            if (maxId) params.set('max_id', maxId);
+
+            const resp = await fetch(`/api/v1/friendships/${userId}/following/?${params}`, {
+              headers: {
+                'x-ig-app-id': appId,
+                'x-requested-with': 'XMLHttpRequest',
+              },
+              credentials: 'include',
+            });
+
+            if (!resp.ok) {
+              if (resp.status === 401 || resp.status === 403) break;
+              break;
+            }
+
+            const data = await resp.json();
+            const users = data.users || [];
+            if (users.length === 0) break;
+
+            for (const u of users) {
+              if (u.username) {
+                allUsers.push({
+                  username: u.username,
+                  fullName: u.full_name || u.username,
+                });
+              }
+            }
+
+            hasMore = !!data.next_max_id;
+            maxId = data.next_max_id || '';
+            if (!maxId) hasMore = false;
+
+            // Rate limit delay
+            await new Promise(r => setTimeout(r, 1500 + Math.random() * 2000));
+          } catch {
+            break;
+          }
+        }
+
+        return allUsers;
+      },
+      userId,
+      appId,
+      maxUsers
+    );
   }
 
   /* ================================================================

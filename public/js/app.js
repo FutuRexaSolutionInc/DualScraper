@@ -75,6 +75,10 @@
     $('#btnScrapeAll').addEventListener('click', scrapeAll);
     $('#btnScrapeIg').addEventListener('click', scrapeCustomInstagram);
     $('#btnLoadResults').addEventListener('click', loadSavedResults);
+    $('#btnIgConnect').addEventListener('click', connectIgSession);
+    $('#btnDashIgDisconnect').addEventListener('click', disconnectIgSession);
+    $('#btnScrapeFollowers').addEventListener('click', scrapeFollowers);
+    $('#btnScrapeFollowing').addEventListener('click', scrapeFollowing);
   }
 
   // ── Load Brands ─────────────────────────────────────────────
@@ -114,7 +118,7 @@
         const handles = (b.instagram || []).map((h) => `@${h}`).join(', ');
 
         return `
-          <div class="brand-card">
+          <div class="brand-card" id="brand-card-${b.slug}">
             <div class="brand-card-name">${b.name}</div>
             <div class="brand-card-tags">
               <span class="brand-tag">${icon('instagram', 'brand-tag-icon')} ${handles || 'Instagram'}</span>
@@ -151,6 +155,8 @@
     loadSavedResults();
   };
 
+
+
   // ── Check Status ────────────────────────────────────────────
   async function checkStatus() {
     try {
@@ -169,13 +175,185 @@
       $('#statExports').textContent = s.totalExports;
       $('#statEngine').textContent = 'Online';
 
-      // Update IG auth status
+      // Update IG auth status in sidebar and UI
+      updateIgAuthUI(s.igAuthenticated);
+
       loadJobs();
       loadExports();
     } catch {
       $('.status-dot').className = 'status-dot offline';
       $('.status-text').textContent = 'Server Offline';
       $('#statEngine').textContent = 'Offline';
+    }
+  }
+
+  // ── Instagram Auth UI ─────────────────────────────────────
+  function updateIgAuthUI(isAuthenticated) {
+    // Sidebar
+    const authDot = $('#igAuthDot');
+    const authText = $('#igAuthText');
+    if (authDot) authDot.className = isAuthenticated ? 'ig-auth-dot connected' : 'ig-auth-dot';
+    if (authText) authText.textContent = isAuthenticated ? 'IG: Connected' : 'IG: Not Connected';
+
+    // Dashboard header
+    const connectDiv = $('#dashIgConnect');
+    const connectedDiv = $('#dashIgConnected');
+    if (connectDiv) connectDiv.classList.toggle('hidden', isAuthenticated);
+    if (connectedDiv) connectedDiv.classList.toggle('hidden', !isAuthenticated);
+
+    // Custom Scrape followers/following buttons
+    const followersBtn = $('#btnScrapeFollowers');
+    const followingBtn = $('#btnScrapeFollowing');
+    if (followersBtn) {
+      followersBtn.disabled = !isAuthenticated;
+      followersBtn.title = isAuthenticated ? 'Extract follower list' : 'Connect Instagram to enable';
+    }
+    if (followingBtn) {
+      followingBtn.disabled = !isAuthenticated;
+      followingBtn.title = isAuthenticated ? 'Extract following list' : 'Connect Instagram to enable';
+    }
+
+    // Scrape Brands page followers checkbox
+    const srcFollowers = $('#srcFollowers');
+    if (srcFollowers) {
+      srcFollowers.disabled = !isAuthenticated;
+      if (!isAuthenticated) srcFollowers.checked = false;
+      const label = srcFollowers.closest('.checkbox-label');
+      if (label) label.title = isAuthenticated ? 'Also extract follower list' : 'Connect Instagram first to enable this option';
+    }
+  }
+
+  // ── Connect Instagram Session ─────────────────────────────
+  async function connectIgSession() {
+    const btn = $('#btnIgConnect');
+    btn.disabled = true;
+    btn.textContent = 'Opening browser...';
+
+    try {
+      showToast('A browser window will open — please log in to Instagram there.', 'info');
+
+      const res = await fetch('/api/ig-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        showToast(data.error, 'error');
+        return;
+      }
+
+      showToast('Instagram connected! You can now extract followers & likers for each brand.', 'success');
+      $('#igLoginModal').classList.add('hidden');
+      updateIgAuthUI(true);
+      renderBrandCards();
+    } catch (err) {
+      showToast('Failed to connect: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = `<svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Open Instagram Login`;
+    }
+  }
+
+  // ── Disconnect Instagram Session ──────────────────────────
+  async function disconnectIgSession() {
+    try {
+      const res = await fetch('/api/ig-logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        showToast(data.error, 'error');
+        return;
+      }
+
+      showToast('Instagram disconnected.', 'info');
+      updateIgAuthUI(false);
+      renderBrandCards();
+    } catch (err) {
+      showToast('Failed to disconnect: ' + err.message, 'error');
+    }
+  }
+
+  // ── Scrape Followers ──────────────────────────────────────
+  async function scrapeFollowers() {
+    const handle = $('#customIgHandle').value.trim().replace(/^@/, '');
+    if (!handle) {
+      showToast('Please enter an Instagram handle', 'error');
+      return;
+    }
+
+    const brand = $('#customIgBrand').value.trim() || handle;
+    const btn = $('#btnScrapeFollowers');
+    btn.disabled = true;
+    showToast(`Extracting followers for @${handle}... This may take a few minutes.`, 'info');
+
+    try {
+      const res = await fetch('/api/scrape-followers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handle, brand }),
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        showToast(data.error, 'error');
+        return;
+      }
+
+      showToast(`Found ${data.totalUnique || data.customers?.length || 0} followers`, 'success');
+      displayResults(
+        { customers: data.customers || [], totalUnique: data.totalUnique || 0, brand },
+        '#customResultsSummary',
+        '#customResultsTable',
+        '#customResults'
+      );
+    } catch (err) {
+      showToast('Failed to extract followers: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ── Scrape Following ──────────────────────────────────────
+  async function scrapeFollowing() {
+    const handle = $('#customIgHandle').value.trim().replace(/^@/, '');
+    if (!handle) {
+      showToast('Please enter an Instagram handle', 'error');
+      return;
+    }
+
+    const brand = $('#customIgBrand').value.trim() || handle;
+    const btn = $('#btnScrapeFollowing');
+    btn.disabled = true;
+    showToast(`Extracting following list for @${handle}... This may take a few minutes.`, 'info');
+
+    try {
+      const res = await fetch('/api/scrape-following', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ handle, brand }),
+      });
+      const data = await res.json();
+
+      if (!data.success) {
+        showToast(data.error, 'error');
+        return;
+      }
+
+      showToast(`Found ${data.totalUnique || data.customers?.length || 0} accounts in following list`, 'success');
+      displayResults(
+        { customers: data.customers || [], totalUnique: data.totalUnique || 0, brand },
+        '#customResultsSummary',
+        '#customResultsTable',
+        '#customResults'
+      );
+    } catch (err) {
+      showToast('Failed to extract following: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -258,6 +436,7 @@
     }
 
     const sources = ['instagram'];
+    const includeFollowers = $('#srcFollowers') && $('#srcFollowers').checked;
 
     const progress = $('#scrapeProgress');
     const results = $('#scrapeResults');
@@ -272,7 +451,7 @@
     scrapeBtn.disabled = true;
 
     addLog(log, `Starting scrape for ${brand}...`, 'info');
-    addLog(log, `Sources: ${sources.join(', ')}`, 'info');
+    addLog(log, `Sources: ${sources.join(', ')}${includeFollowers ? ' + Followers' : ''}`, 'info');
     addLog(log, 'This can take 2-15 minutes for large brands while Instagram pages are processed.', 'info');
     bar.style.width = '10%';
 
@@ -280,7 +459,7 @@
       const res = await fetch('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brand, sources }),
+        body: JSON.stringify({ brand, sources, includeFollowers }),
       });
       const data = await parseJsonResponse(res);
 
@@ -331,7 +510,7 @@
   }
 
   async function waitForBrandCompletion(brandSlug, log, bar) {
-    const maxChecks = 180; // ~15 minutes at 5s interval
+    const maxChecks = 480; // ~40 minutes at 5s interval
 
     for (let i = 1; i <= maxChecks; i++) {
       await sleep(5000);
@@ -412,7 +591,7 @@
   async function pollJobs(log, bar) {
     let done = false;
     let ticks = 0;
-    while (!done && ticks < 60) {
+    while (!done && ticks < 480) {
       await sleep(5000);
       ticks++;
       try {
@@ -562,6 +741,10 @@
           engagementBadge += '<span class="engagement-badge comment-badge">💬 comment</span> ';
         } else if (t === 'like') {
           engagementBadge += '<span class="engagement-badge like-badge">❤️ like</span> ';
+        } else if (t === 'follower') {
+          engagementBadge += '<span class="engagement-badge follower-badge">👤 follower</span> ';
+        } else if (t === 'following') {
+          engagementBadge += '<span class="engagement-badge following-badge">➡️ following</span> ';
         } else {
           engagementBadge += `<span class="engagement-badge">${escHtml(t)}</span> `;
         }

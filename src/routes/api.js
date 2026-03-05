@@ -34,7 +34,7 @@ function createApiRouter(orchestrator) {
   // Body: { brand: "slug" }
   // ============================================================
   router.post('/scrape', async (req, res) => {
-    const { brand } = req.body;
+    const { brand, includeFollowers } = req.body;
     const sources = ['instagram'];
 
     const runningJob = getRunningJob();
@@ -75,7 +75,7 @@ function createApiRouter(orchestrator) {
     });
 
     // Run in background
-    orchestrator.scrapeBrand(brand, sources).catch((error) => {
+    orchestrator.scrapeBrand(brand, sources, null, includeFollowers).catch((error) => {
       logger.error(`Background scrape failed for ${brand}: ${error.message}`);
     });
   });
@@ -182,6 +182,115 @@ function createApiRouter(orchestrator) {
   });
 
   // ============================================================
+  // POST /api/ig-session - Connect Instagram session (optional login)
+  // Body: { sessionId: "..." }
+  // ============================================================
+  router.post('/ig-session', (req, res) => {
+    const { sessionId } = req.body;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.trim().length < 10) {
+      return res.status(400).json({ success: false, error: 'A valid session ID is required (paste from browser DevTools)' });
+    }
+
+    try {
+      orchestrator.setIgSession(sessionId.trim());
+      res.json({ success: true, message: 'Instagram session connected. Authenticated features enabled.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  // ============================================================
+  // POST /api/ig-login - Open browser window for manual Instagram login
+  // ============================================================
+  router.post('/ig-login', async (req, res) => {
+    try {
+      const result = await orchestrator.loginIg();
+      if (result.success) {
+        res.json({ success: true, message: result.message });
+      } else {
+        res.status(401).json({ success: false, error: result.message });
+      }
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ============================================================
+  // POST /api/ig-logout - Disconnect Instagram session
+  // ============================================================
+  router.post('/ig-logout', (req, res) => {
+    orchestrator.clearIgSession();
+    res.json({ success: true, message: 'Instagram session disconnected.' });
+  });
+
+  // ============================================================
+  // POST /api/scrape-followers-all - Auto-scrape followers for all brands
+  // ============================================================
+  router.post('/scrape-followers-all', async (req, res) => {
+    if (!orchestrator.isIgAuthenticated()) {
+      return res.status(401).json({ success: false, error: 'Instagram session required. Connect your account first.' });
+    }
+
+    const brands = getAllBrands().filter((b) => (b.instagram?.handles || []).length > 0);
+    if (!brands.length) {
+      return res.status(400).json({ success: false, error: 'No brands with Instagram handles configured.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Auto-extracting followers for all brands',
+      brands: brands.map((b) => b.name),
+    });
+
+    // Run in background
+    orchestrator.scrapeAllBrandFollowers().catch((error) => {
+      logger.error(`scrape-followers-all failed: ${error.message}`);
+    });
+  });
+
+  // ============================================================
+  // POST /api/scrape-followers - Scrape follower list (requires auth)
+  // Body: { handle: "username", brand: "Brand Name" }
+  // ============================================================
+  router.post('/scrape-followers', async (req, res) => {
+    const { handle, brand } = req.body;
+    if (!handle) {
+      return res.status(400).json({ success: false, error: 'Instagram handle is required' });
+    }
+    if (!orchestrator.isIgAuthenticated()) {
+      return res.status(401).json({ success: false, error: 'Instagram session required. Connect your account first.' });
+    }
+
+    try {
+      const result = await orchestrator.scrapeFollowers(handle.trim().replace(/^@/, ''), brand);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ============================================================
+  // POST /api/scrape-following - Scrape following list (requires auth)
+  // Body: { handle: "username", brand: "Brand Name" }
+  // ============================================================
+  router.post('/scrape-following', async (req, res) => {
+    const { handle, brand } = req.body;
+    if (!handle) {
+      return res.status(400).json({ success: false, error: 'Instagram handle is required' });
+    }
+    if (!orchestrator.isIgAuthenticated()) {
+      return res.status(401).json({ success: false, error: 'Instagram session required. Connect your account first.' });
+    }
+
+    try {
+      const result = await orchestrator.scrapeFollowing(handle.trim().replace(/^@/, ''), brand);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // ============================================================
   // GET /api/results/:brand - Get latest results for a brand
   // ============================================================
   router.get('/results/:brand', (req, res) => {
@@ -260,7 +369,7 @@ function createApiRouter(orchestrator) {
         completedJobs: completed,
         totalExports: exports.length,
         configuredBrands: getAllBrands().length,
-        igAuthenticated: false,
+        igAuthenticated: orchestrator.isIgAuthenticated(),
         memory: {
           rssMB: Math.round(mem.rss / 1024 / 1024),
           heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
