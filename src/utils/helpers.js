@@ -71,17 +71,28 @@ function mergeArrays(a = [], b = []) {
 }
 
 /**
+ * Decode unicode escape sequences (\uXXXX) into actual characters.
+ * Instagram API sometimes returns emoji as raw escape sequences.
+ */
+function decodeUnicodeEscapes(text) {
+  if (!text || typeof text !== 'string' || !text.includes('\\u')) return text;
+  return text.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+}
+
+/**
  * Create a standardized customer record
  */
 function createCustomerRecord({ name, username, profileUrl, source, brand, comment, date, engagement }) {
   return {
     id: uuidv4(),
-    name: name || null,
+    name: decodeUnicodeEscapes(name) || null,
     username: username || null,
     profileUrl: profileUrl || null,
     source: source || 'unknown',
     brand: brand || null,
-    comment: comment || null,
+    comment: decodeUnicodeEscapes(comment) || null,
     date: date || null,
     engagement: engagement || null,
     scrapedAt: new Date().toISOString(),
@@ -141,6 +152,7 @@ module.exports = {
   deduplicateCustomers,
   mergeArrays,
   createCustomerRecord,
+  decodeUnicodeEscapes,
   delay,
   safeJsonParse,
   cleanText,
