@@ -34,7 +34,7 @@ function exportToCsv(brand, customers, filename) {
 
   const fields = [
     'id', 'name', 'username', 'profileUrl', 'source',
-    'brand', 'comment', 'date', 'engagement', 'scrapedAt',
+    'brand', 'comment', 'date', 'engagement', 'engagements', 'scrapedAt',
   ];
 
   const parser = new CsvParser({ fields });

@@ -57,6 +57,15 @@ const brands = {
       hashtags: ['toniandguy', 'toniandguypk'],
     },
   },
+
+  'nia-mia': {
+    name: 'Nia Mia',
+    slug: 'nia-mia',
+    instagram: {
+      handles: ['nia.miaofficial'],
+      hashtags: ['niamia', 'niamiaofficial'],
+    },
+  },
 };
 
 /**

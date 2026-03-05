@@ -20,11 +20,12 @@ puppeteer.use(StealthPlugin());
 class InstagramScraper {
   constructor() {
     const isProduction = process.env.NODE_ENV === 'production';
-    this.MAX_POSTS = isProduction ? 8 : 15;                // fewer posts in prod to save memory/time
+    this.MAX_POSTS = isProduction ? 15 : 30;               // scrape more posts for better client coverage
     this.MAX_COMMENTS_PER_POST = isProduction ? 80 : 200;  // fewer comments in prod
     this.IG_APP_ID = '936619743392459'; // Instagram's public web app ID
     this.BROWSER_PATH = this._findBrowser();
     this.isProduction = isProduction;
+    this._discoveredLikers = new Map(); // shortcode -> [{username, fullName}] — likers found during comment extraction
   }
 
   /* ================================================================
@@ -228,6 +229,7 @@ class InstagramScraper {
     const hasCsrf = cookies.some((c) => c.name === 'csrftoken');
     logger.info(`[IG-Session] Session ready — CSRF: ${hasCsrf ? 'YES' : 'NO'}, Cookies: ${cookies.length}`);
 
+    // ── Login if credentials are provided ──
     // Clear navigation memory before scraping
     await page.evaluate(() => {
       if (window.gc) window.gc();
@@ -270,28 +272,119 @@ class InstagramScraper {
       }
     }
 
-    // Step 4: Sort by engagement (most comments first)
-    posts.sort((a, b) => b.commentCount - a.commentCount);
-    const postsToScrape = posts.slice(0, this.MAX_POSTS);
+    // Step 3b: Fetch reels separately (they have high engagement)
+    try {
+      const reels = await this._fetchReels(page, userId, username);
+      if (reels.length > 0) {
+        logger.info(`[IG-API] @${username}: ${reels.length} reels fetched`);
+        posts.push(...reels);
+      }
+    } catch (err) {
+      logger.debug(`[IG-API] Reels fetch failed: ${err.message}`);
+    }
 
-    // Step 5: Fetch comments for each post
+    // Step 4: Sort by engagement (most comments + likes first)
+    posts.sort((a, b) => (b.commentCount + b.likeCount) - (a.commentCount + a.likeCount));
+    const postsToScrape = posts.slice(0, this.MAX_POSTS);
+    logger.info(`[IG-API] Scraping ${postsToScrape.length} posts/reels (${postsToScrape.filter(p => p.isReel).length} reels)`);
+
+    // Step 5: Extract tagged users and caption @mentions from post metadata (no auth needed)
     const allCustomers = [];
+    let taggedCount = 0;
+    let mentionCount = 0;
+    const seenTagged = new Set();
+
+    for (const post of postsToScrape) {
+      // Tagged users in photos (usertags)
+      for (const tag of (post.taggedUsers || [])) {
+        if (!tag.username || tag.username === username || seenTagged.has(tag.username)) continue;
+        if (!this._isValidUsername(tag.username)) continue;
+        seenTagged.add(tag.username);
+        taggedCount++;
+        allCustomers.push(
+          createCustomerRecord({
+            name: tag.fullName || tag.username,
+            username: tag.username,
+            profileUrl: `https://www.instagram.com/${tag.username}/`,
+            source: 'instagram',
+            brand: brandName,
+            comment: null,
+            engagement: { type: 'tagged', postCode: post.shortcode },
+          })
+        );
+      }
+      // @mentions in captions
+      for (const mentioned of (post.captionMentions || [])) {
+        if (!mentioned || mentioned === username || seenTagged.has(mentioned)) continue;
+        if (!this._isValidUsername(mentioned)) continue;
+        seenTagged.add(mentioned);
+        mentionCount++;
+        allCustomers.push(
+          createCustomerRecord({
+            name: mentioned,
+            username: mentioned,
+            profileUrl: `https://www.instagram.com/${mentioned}/`,
+            source: 'instagram',
+            brand: brandName,
+            comment: null,
+            engagement: { type: 'mentioned', postCode: post.shortcode },
+          })
+        );
+      }
+    }
+    if (taggedCount > 0 || mentionCount > 0) {
+      logger.info(`[IG-API] @${username}: ${taggedCount} tagged users + ${mentionCount} caption mentions extracted from post metadata`);
+    }
+
+    // Step 6: Fetch comments and likers for each post/reel
     let workingStrategy = null;
 
     for (const post of postsToScrape) {
-      if (post.commentCount === 0) continue;
-
+      // Always try to fetch commenters — don't trust commentCount from profile API
       try {
         const { commenters, strategy } = await this._fetchPostCommenters(
           page, post, username, brandName, workingStrategy
         );
         if (strategy) workingStrategy = strategy;
         allCustomers.push(...commenters);
+
+        // Extract @mentions from comment text (people tagged in comments are potential clients)
+        for (const c of commenters) {
+          if (!c.comment) continue;
+          const commentMentions = (c.comment.match(/@([a-zA-Z0-9._]{1,30})/g) || []).map(m => m.slice(1));
+          for (const mentioned of commentMentions) {
+            if (!mentioned || mentioned === username || seenTagged.has(mentioned)) continue;
+            if (!this._isValidUsername(mentioned)) continue;
+            seenTagged.add(mentioned);
+            allCustomers.push(
+              createCustomerRecord({
+                name: mentioned,
+                username: mentioned,
+                profileUrl: `https://www.instagram.com/${mentioned}/`,
+                source: 'instagram',
+                brand: brandName,
+                comment: null,
+                engagement: { type: 'mentioned_in_comment', postCode: post.shortcode },
+              })
+            );
+          }
+        }
+
         logger.debug(
           `[IG-API] Post ${post.shortcode}: ${commenters.length} commenters via ${strategy || 'none'}`
         );
       } catch (err) {
         logger.debug(`[IG-API] Comment fetch failed for ${post.shortcode}: ${err.message}`);
+      }
+      await delay(1500 + Math.random() * 2500);
+
+      // Always try to fetch likers
+      try {
+        const likers = await this._fetchPostLikers(page, post, username, brandName);
+        allCustomers.push(...likers);
+        logger.debug(`[IG-API] Post ${post.shortcode}: ${likers.length} likers`);
+      } catch (err) {
+        logger.debug(`[IG-API] Likers fetch failed for ${post.shortcode}: ${err.message}`);
       }
       await delay(1500 + Math.random() * 2500);
     }
@@ -334,7 +427,7 @@ class InstagramScraper {
    */
   _extractPostsFromProfile(profileData) {
     const edges = profileData.edge_owner_to_timeline_media?.edges || [];
-    return edges.map((edge) => ({
+    const posts = edges.map((edge) => ({
       shortcode: edge.node.shortcode,
       id: edge.node.id,
       commentCount: edge.node.edge_media_to_comment?.count || 0,
@@ -342,13 +435,38 @@ class InstagramScraper {
         edge.node.edge_liked_by?.count ||
         edge.node.edge_media_preview_like?.count ||
         0,
+      caption: edge.node.edge_media_to_caption?.edges?.[0]?.node?.text || '',
       timestamp: edge.node.taken_at_timestamp,
       isVideo: edge.node.is_video || false,
+      isReel: edge.node.is_video && edge.node.product_type === 'clips',
     }));
+
+    // Also extract reels from edge_felix_video_timeline if available
+    const reelEdges = profileData.edge_felix_video_timeline?.edges || [];
+    for (const edge of reelEdges) {
+      const sc = edge.node?.shortcode;
+      if (sc && !posts.some(p => p.shortcode === sc)) {
+        posts.push({
+          shortcode: sc,
+          id: edge.node.id,
+          commentCount: edge.node.edge_media_to_comment?.count || 0,
+          likeCount:
+            edge.node.edge_liked_by?.count ||
+            edge.node.edge_media_preview_like?.count ||
+            0,
+          caption: edge.node.edge_media_to_caption?.edges?.[0]?.node?.text || '',
+          timestamp: edge.node.taken_at_timestamp,
+          isVideo: true,
+          isReel: true,
+        });
+      }
+    }
+
+    return posts;
   }
 
   /**
-   * Paginate through more posts via GraphQL
+   * Paginate through more posts via REST API + GraphQL fallback
    */
   async _fetchMorePosts(page, userId, endCursor) {
     const appId = this.IG_APP_ID;
@@ -357,6 +475,68 @@ class InstagramScraper {
     return page.evaluate(
       async (userId, endCursor, appId, maxPosts) => {
         const allPosts = [];
+
+        // Strategy 1: REST API v1 user feed (more reliable than GraphQL)
+        try {
+          let maxId = '';
+          let hasMore = true;
+          while (hasMore && allPosts.length < maxPosts) {
+            const params = new URLSearchParams({ count: '12' });
+            if (maxId) params.set('max_id', maxId);
+            const resp = await fetch(`/api/v1/feed/user/${userId}/?${params}`, {
+              headers: {
+                'x-ig-app-id': appId,
+                'x-requested-with': 'XMLHttpRequest',
+              },
+              credentials: 'include',
+            });
+            if (!resp.ok) break;
+            const data = await resp.json();
+            const items = data.items || [];
+            if (items.length === 0) break;
+            for (const item of items) {
+              if (item.code || item.shortcode) {
+                // Extract tagged users and caption @mentions (available without auth)
+                const tagged = (item.usertags?.in || []).map(t => ({
+                  username: t.user?.username,
+                  fullName: t.user?.full_name || t.user?.username,
+                })).filter(t => t.username);
+                const captionText = item.caption?.text || '';
+                const mentions = [];
+                const mentionRegex = /@([a-zA-Z0-9._]{1,30})/g;
+                let mm;
+                while ((mm = mentionRegex.exec(captionText)) !== null) mentions.push(mm[1]);
+                // Also check carousel items for tags
+                for (const cm of (item.carousel_media || [])) {
+                  for (const t of (cm.usertags?.in || [])) {
+                    if (t.user?.username && !tagged.some(x => x.username === t.user.username)) {
+                      tagged.push({ username: t.user.username, fullName: t.user.full_name || t.user.username });
+                    }
+                  }
+                }
+                allPosts.push({
+                  shortcode: item.code || item.shortcode,
+                  id: item.pk?.toString() || item.id?.toString() || null,
+                  commentCount: item.comment_count || 0,
+                  likeCount: item.like_count || 0,
+                  timestamp: item.taken_at,
+                  isVideo: item.media_type === 2 || item.is_video || false,
+                  isReel: item.product_type === 'clips',
+                  taggedUsers: tagged,
+                  captionMentions: mentions,
+                });
+              }
+            }
+            hasMore = data.more_available || false;
+            maxId = data.next_max_id || '';
+            if (!maxId) hasMore = false;
+            await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1500));
+          }
+        } catch {}
+
+        if (allPosts.length > 0) return allPosts;
+
+        // Strategy 2: GraphQL fallback
         let cursor = endCursor;
         let hasNext = true;
 
@@ -423,6 +603,130 @@ class InstagramScraper {
     );
   }
 
+  /**
+   * Get the correct Instagram URL for a post or reel
+   */
+  _getPostUrl(post) {
+    if (post.isReel) {
+      return `https://www.instagram.com/reel/${post.shortcode}/`;
+    }
+    return `https://www.instagram.com/p/${post.shortcode}/`;
+  }
+
+  /**
+   * Fetch reels via Instagram clips API
+   */
+  async _fetchReels(page, userId, username) {
+    const appId = this.IG_APP_ID;
+    const maxPosts = this.MAX_POSTS;
+
+    const reels = await page.evaluate(
+      async (userId, appId, maxPosts) => {
+        const allReels = [];
+
+        // Strategy 1: Clips API (v1)
+        try {
+          const resp = await fetch('/api/v1/clips/user/', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/x-www-form-urlencoded',
+              'x-ig-app-id': appId,
+              'x-requested-with': 'XMLHttpRequest',
+            },
+            credentials: 'include',
+            body: `target_user_id=${userId}&page_size=${Math.min(maxPosts, 12)}&include_feed_video=true`,
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const items = data.items || [];
+            for (const item of items) {
+              const media = item.media || item;
+              if (media.code || media.shortcode) {
+                const tagged = (media.usertags?.in || []).map(t => ({
+                  username: t.user?.username,
+                  fullName: t.user?.full_name || t.user?.username,
+                })).filter(t => t.username);
+                const capText = media.caption?.text || '';
+                const mentions = [];
+                const mReg = /@([a-zA-Z0-9._]{1,30})/g;
+                let mx;
+                while ((mx = mReg.exec(capText)) !== null) mentions.push(mx[1]);
+                allReels.push({
+                  shortcode: media.code || media.shortcode,
+                  id: media.pk?.toString() || media.id?.toString() || null,
+                  commentCount: media.comment_count || 0,
+                  likeCount: media.like_count || 0,
+                  caption: capText,
+                  timestamp: media.taken_at,
+                  isVideo: true,
+                  isReel: true,
+                  taggedUsers: tagged,
+                  captionMentions: mentions,
+                });
+              }
+            }
+          }
+        } catch {}
+
+        if (allReels.length > 0) return allReels;
+
+        // Strategy 2: GraphQL reels tray
+        try {
+          const hashes = [
+            'bc78b344a68ed16dd5d7f264681c4c76',
+            'd4d88dc1500312af6f937f7b804c68c3',
+          ];
+          const variables = JSON.stringify({ id: userId, first: Math.min(maxPosts, 12) });
+          for (const hash of hashes) {
+            try {
+              const resp = await fetch(
+                `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(variables)}`,
+                {
+                  headers: {
+                    'x-ig-app-id': appId,
+                    'x-requested-with': 'XMLHttpRequest',
+                  },
+                  credentials: 'include',
+                }
+              );
+              if (!resp.ok) continue;
+              const data = await resp.json();
+              const edges =
+                data.data?.user?.edge_felix_video_timeline?.edges ||
+                [];
+              if (edges.length > 0) {
+                for (const edge of edges) {
+                  allReels.push({
+                    shortcode: edge.node.shortcode,
+                    id: edge.node.id,
+                    commentCount: edge.node.edge_media_to_comment?.count || 0,
+                    likeCount:
+                      edge.node.edge_liked_by?.count ||
+                      edge.node.edge_media_preview_like?.count ||
+                      0,
+                    caption: edge.node.edge_media_to_caption?.edges?.[0]?.node?.text || '',
+                    timestamp: edge.node.taken_at_timestamp,
+                    isVideo: true,
+                    isReel: true,
+                  });
+                }
+                break;
+              }
+            } catch {}
+          }
+        } catch {}
+
+        return allReels;
+      },
+      userId,
+      appId,
+      maxPosts
+    );
+
+    // Deduplicate reels that might already be in posts
+    return reels;
+  }
+
   /* ================================================================
      Comment fetching — 4-strategy cascade
      ================================================================ */
@@ -434,28 +738,47 @@ class InstagramScraper {
     // Strategy 1: REST v1 comments API
     if (!preferredStrategy || preferredStrategy === 'v1') {
       comments = await this._fetchCommentsV1(page, post.id);
-      if (comments.length > 0) strategy = 'v1';
+      if (comments.length > 0) {
+        strategy = 'v1';
+      } else {
+        logger.info(`[IG-Comments] Post ${post.shortcode}: V1 API returned 0 comments`);
+      }
     }
 
     // Strategy 2: GraphQL comments query
     if (comments.length === 0 && (!preferredStrategy || preferredStrategy === 'graphql')) {
       comments = await this._fetchCommentsGraphQL(page, post.shortcode);
-      if (comments.length > 0) strategy = 'graphql';
+      if (comments.length > 0) {
+        strategy = 'graphql';
+      } else {
+        logger.info(`[IG-Comments] Post ${post.shortcode}: GraphQL returned 0 comments`);
+      }
     }
 
     // Strategy 3: XHR interception (navigate to post page)
     if (comments.length === 0) {
-      comments = await this._fetchCommentsViaInterception(page, post.shortcode);
-      if (comments.length > 0) strategy = 'intercept';
+      comments = await this._fetchCommentsViaInterception(page, post);
+      if (comments.length > 0) {
+        strategy = 'intercept';
+      } else {
+        logger.info(`[IG-Comments] Post ${post.shortcode}: XHR interception returned 0 comments`);
+      }
     }
 
     // Strategy 4: DOM fallback
     if (comments.length === 0) {
-      comments = await this._fetchCommentsDOMFallback(page, post.shortcode, profileUsername);
-      if (comments.length > 0) strategy = 'dom';
+      comments = await this._fetchCommentsDOMFallback(page, post, profileUsername);
+      if (comments.length > 0) {
+        strategy = 'dom';
+      } else {
+        logger.info(`[IG-Comments] Post ${post.shortcode}: DOM fallback returned 0 comments`);
+      }
     }
 
-    // Filter + convert to customer records
+    logger.info(`[IG-API] Post ${post.shortcode}: ${comments.length} raw comments via strategy=${strategy || 'none'}`);
+
+    // Convert to customer records — keep ALL comments (no per-post dedup)
+    // Global dedup happens later in helpers.deduplicateCustomers
     const validCustomers = [];
     const seen = new Set();
 
@@ -465,6 +788,9 @@ class InstagramScraper {
       if (!this._isValidUsername(username)) continue;
       seen.add(username);
 
+      // Preserve comment text — use the raw text, keep empty strings as-is
+      const commentText = (comment.text && comment.text.trim()) ? comment.text.trim() : null;
+
       validCustomers.push(
         createCustomerRecord({
           name: comment.fullName || username,
@@ -472,13 +798,559 @@ class InstagramScraper {
           profileUrl: `https://www.instagram.com/${username}/`,
           source: 'instagram',
           brand: brandName,
-          comment: comment.text || null,
+          comment: commentText,
           engagement: { type: 'comment', postCode: post.shortcode },
         })
       );
     }
 
     return { commenters: validCustomers, strategy };
+  }
+
+  /* ================================================================
+     Likes fetching — multi-strategy (REST API + Post page DOM/JSON)
+     ================================================================ */
+
+  /**
+   * Fetch users who liked a post.
+   * Strategy cascade:
+   *   1. REST v1 likers API (requires auth — may return empty without login)
+   *   2. GraphQL shortcode_media query (edge_media_preview_like)
+   *   3. Navigate to post page and extract likers from embedded JSON + DOM
+   */
+  async _fetchPostLikers(page, post, profileUsername, brandName) {
+    let likers = [];
+
+    // Strategy 0: Check likers discovered during comment extraction (XHR interception)
+    const discovered = this._discoveredLikers.get(post.shortcode) || [];
+    if (discovered.length > 0) {
+      likers = discovered;
+      logger.info(`[IG-Likes] Post ${post.shortcode}: ${likers.length} likers from comment-phase discovery`);
+      this._discoveredLikers.delete(post.shortcode);
+    }
+
+    // Strategy 1: REST v1 likers API
+    if (likers.length === 0 && post.id) {
+      likers = await this._fetchLikersV1(page, post.id);
+      if (likers.length > 0) {
+        logger.info(`[IG-Likes] Post ${post.shortcode}: ${likers.length} likers via REST API`);
+      }
+    }
+
+    // Strategy 2: GraphQL shortcode query — get preview likers
+    if (likers.length === 0) {
+      likers = await this._fetchLikersGraphQL(page, post.shortcode);
+      if (likers.length > 0) {
+        logger.info(`[IG-Likes] Post ${post.shortcode}: ${likers.length} likers via GraphQL`);
+      }
+    }
+
+    // Strategy 3: Navigate to post page and extract from embedded JSON + DOM
+    if (likers.length === 0) {
+      likers = await this._fetchLikersFromPostPage(page, post, profileUsername);
+      if (likers.length > 0) {
+        logger.info(`[IG-Likes] Post ${post.shortcode}: ${likers.length} likers via post page DOM`);
+      }
+    }
+
+    // Convert to customer records
+    const validCustomers = [];
+    const seen = new Set();
+
+    for (const liker of likers) {
+      const username = liker.username;
+      if (!username || username === profileUsername || seen.has(username)) continue;
+      if (!this._isValidUsername(username)) continue;
+      seen.add(username);
+
+      validCustomers.push(
+        createCustomerRecord({
+          name: liker.fullName || username,
+          username,
+          profileUrl: `https://www.instagram.com/${username}/`,
+          source: 'instagram',
+          brand: brandName,
+          comment: null,
+          engagement: { type: 'like', postCode: post.shortcode },
+        })
+      );
+    }
+
+    logger.info(`[IG-API] Post ${post.shortcode}: ${validCustomers.length} likers fetched`);
+    return validCustomers;
+  }
+
+  /**
+   * Strategy 1: REST v1 likers API (works best with auth session)
+   */
+  async _fetchLikersV1(page, mediaId) {
+    const appId = this.IG_APP_ID;
+    return page.evaluate(
+      async (mediaId, appId) => {
+        try {
+          const resp = await fetch(`/api/v1/media/${mediaId}/likers/`, {
+            headers: {
+              'x-ig-app-id': appId,
+              'x-requested-with': 'XMLHttpRequest',
+            },
+            credentials: 'include',
+          });
+          if (!resp.ok) return [];
+          const data = await resp.json();
+          const users = data.users || [];
+          return users.map((u) => ({
+            username: u.username,
+            fullName: u.full_name || u.username,
+          }));
+        } catch {
+          return [];
+        }
+      },
+      mediaId,
+      appId
+    );
+  }
+
+  /**
+   * Strategy 2: GraphQL query for shortcode_media — extract preview likers
+   */
+  async _fetchLikersGraphQL(page, shortcode) {
+    const appId = this.IG_APP_ID;
+    return page.evaluate(
+      async (shortcode, appId) => {
+        const hashes = [
+          'bc3296d1ce80a24b1b6e40b1e72903f5',
+          '97b41c52301f77ce508f55e66d17620e',
+          '477b65a610463740ccdb83135b2014db',
+        ];
+        const variables = JSON.stringify({ shortcode, first: 1 });
+        for (const hash of hashes) {
+          try {
+            const resp = await fetch(
+              `/graphql/query/?query_hash=${hash}&variables=${encodeURIComponent(variables)}`,
+              {
+                headers: {
+                  'x-ig-app-id': appId,
+                  'x-requested-with': 'XMLHttpRequest',
+                },
+                credentials: 'include',
+              }
+            );
+            if (!resp.ok) continue;
+            const data = await resp.json();
+            const media = data?.data?.shortcode_media;
+            if (!media) continue;
+
+            const likers = [];
+            // edge_media_preview_like sometimes has user edges
+            const previewLike = media.edge_media_preview_like || media.edge_liked_by;
+            if (previewLike?.edges) {
+              for (const edge of previewLike.edges) {
+                if (edge.node?.username) {
+                  likers.push({
+                    username: edge.node.username,
+                    fullName: edge.node.full_name || edge.node.username,
+                  });
+                }
+              }
+            }
+            if (likers.length > 0) return likers;
+          } catch {}
+        }
+        return [];
+      },
+      shortcode,
+      appId
+    );
+  }
+
+  /**
+   * Strategy 3: Navigate to post page, click likes section, and extract likers from XHR + embedded JSON + DOM
+   */
+  async _fetchLikersFromPostPage(page, post, profileUsername) {
+    const shortcode = typeof post === 'string' ? post : post.shortcode;
+    const isReel = typeof post === 'object' && post.isReel;
+    const likerResults = [];
+
+    // Set up XHR interception to catch liker API responses
+    const handleResponse = async (response) => {
+      try {
+        const url = response.url();
+        if (!url.includes('likers') && !url.includes('graphql') && !url.includes('liked_by')) return;
+        if (response.status() !== 200) return;
+        const data = await response.json().catch(() => null);
+        if (!data) return;
+
+        // REST likers format
+        if (data.users && Array.isArray(data.users)) {
+          for (const u of data.users) {
+            if (u.username) {
+              likerResults.push({ username: u.username, fullName: u.full_name || u.username });
+            }
+          }
+        }
+
+        // GraphQL format — check all possible liker paths
+        const media = data?.data?.shortcode_media || data?.data?.xdt_shortcode_media;
+        if (media) {
+          const likeEdge = media.edge_media_preview_like || media.edge_liked_by;
+          if (likeEdge?.edges) {
+            for (const edge of likeEdge.edges) {
+              if (edge.node?.username) {
+                likerResults.push({ username: edge.node.username, fullName: edge.node.full_name || edge.node.username });
+              }
+            }
+          }
+          if (media.facepile_top_likers && Array.isArray(media.facepile_top_likers)) {
+            for (const u of media.facepile_top_likers) {
+              const uname = typeof u === 'string' ? u : u?.username;
+              if (uname) likerResults.push({ username: uname, fullName: u?.full_name || uname });
+            }
+          }
+        }
+      } catch {}
+    };
+
+    page.on('response', handleResponse);
+
+    try {
+      // Navigate to post/reel page (skip if already there from comment extraction)
+      const currentUrl = page.url();
+      const postPath = isReel ? `/reel/${shortcode}` : `/p/${shortcode}`;
+      const needsNavigation = !currentUrl.includes(postPath);
+      if (needsNavigation) {
+        const postUrl = isReel
+          ? `https://www.instagram.com/reel/${shortcode}/`
+          : `https://www.instagram.com/p/${shortcode}/`;
+        await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await delay(2000);
+      }
+
+      // ── Phase 1: Deep JSON extraction ──
+      // Parse ALL embedded JSON and recursively find liker data
+      const jsonLikers = await page.evaluate((pUser) => {
+        const likers = [];
+        const seen = new Set();
+        const blocked = new Set([
+          'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+          'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+          'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+          'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+        ]);
+        const isValid = (u) =>
+          u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
+
+        const addUser = (username, fullName) => {
+          if (isValid(username) && !seen.has(username)) {
+            seen.add(username);
+            likers.push({ username, fullName: fullName || username });
+          }
+        };
+
+        // Recursive deep search through parsed JSON
+        function deepSearch(obj, depth) {
+          if (depth > 20 || !obj || typeof obj !== 'object') return;
+
+          // top_likers: array of username strings
+          if (Array.isArray(obj.top_likers)) {
+            for (const u of obj.top_likers) {
+              if (typeof u === 'string') addUser(u, u);
+              else if (u?.username) addUser(u.username, u.full_name || u.username);
+            }
+          }
+
+          // facepile_top_likers: array of objects or strings
+          if (Array.isArray(obj.facepile_top_likers)) {
+            for (const u of obj.facepile_top_likers) {
+              if (typeof u === 'string') addUser(u, u);
+              else if (u?.username) addUser(u.username, u.full_name || u.username);
+            }
+          }
+
+          // edge_media_preview_like / edge_liked_by with edges
+          const likeEdge = obj.edge_media_preview_like || obj.edge_liked_by;
+          if (likeEdge?.edges && Array.isArray(likeEdge.edges)) {
+            for (const edge of likeEdge.edges) {
+              if (edge?.node?.username) addUser(edge.node.username, edge.node.full_name || edge.node.username);
+            }
+          }
+
+          // social_context with usernames (sometimes used for likers)
+          if (obj.social_context && typeof obj.social_context === 'string') {
+            const contextUsers = obj.social_context.matchAll(/@?([a-zA-Z0-9._]{1,30})/g);
+            for (const m of contextUsers) addUser(m[1], m[1]);
+          }
+
+          // Recurse
+          if (Array.isArray(obj)) {
+            for (let i = 0; i < Math.min(obj.length, 200); i++) deepSearch(obj[i], depth + 1);
+          } else {
+            for (const key of Object.keys(obj)) {
+              if (key === '__typename' || key === 'csrf_token') continue;
+              try { deepSearch(obj[key], depth + 1); } catch {}
+            }
+          }
+        }
+
+        // Parse all JSON script tags
+        document.querySelectorAll('script[type="application/json"]').forEach((script) => {
+          try {
+            const data = JSON.parse(script.textContent);
+            deepSearch(data, 0);
+          } catch {}
+        });
+
+        // Also check window.__additionalDataLoaded, _sharedData
+        try {
+          if (window._sharedData) deepSearch(window._sharedData, 0);
+        } catch {}
+        try {
+          if (window.__additionalDataLoaded) {
+            for (const key of Object.keys(window.__additionalDataLoaded)) {
+              deepSearch(window.__additionalDataLoaded[key], 0);
+            }
+          }
+        } catch {}
+
+        // Also search non-JSON scripts for top_likers/facepile patterns via regex
+        document.querySelectorAll('script:not([type="application/json"])').forEach((script) => {
+          try {
+            const text = script.textContent || '';
+            // top_likers: ["user1","user2"]
+            const tlPattern = /"top_likers"\s*:\s*\[([^\]]*)\]/g;
+            let m;
+            while ((m = tlPattern.exec(text)) !== null) {
+              for (const um of m[1].matchAll(/"([^"]+)"/g)) addUser(um[1], um[1]);
+            }
+            // facepile_top_likers with username fields
+            const fpPattern = /"facepile_top_likers"\s*:\s*\[(.*?)\]/gs;
+            while ((m = fpPattern.exec(text)) !== null) {
+              for (const um of m[1].matchAll(/"username"\s*:\s*"([^"]+)"/g)) addUser(um[1], um[1]);
+            }
+          } catch {}
+        });
+
+        return likers;
+      }, profileUsername);
+
+      // ── Phase 2: Click to open likers dialog ──
+      let dialogOpened = false;
+      try {
+        dialogOpened = await page.evaluate(() => {
+          // Strategy A: Look for "liked_by" links
+          const likedByLink = document.querySelector('a[href*="liked_by"]');
+          if (likedByLink) { likedByLink.click(); return true; }
+
+          // Strategy B: Look for various likes text patterns
+          const patterns = [
+            /^\d[\d,.\s]*(likes?|others)\s*$/i,
+            /^liked by/i,
+            /others$/i,
+            /^view\s+\d+\s+likes?$/i,
+          ];
+          const candidates = document.querySelectorAll(
+            'a[href], button, span[role="button"], span[role="link"], section span, section a, div[role="button"]'
+          );
+          for (const el of candidates) {
+            const text = (el.textContent || '').trim();
+            if (patterns.some(p => p.test(text))) {
+              el.click();
+              return true;
+            }
+          }
+
+          // Strategy C: Find the likes section near the heart icon
+          // Instagram structure: section > ... > heart-icon + like count
+          const heartSvgs = document.querySelectorAll('svg[aria-label*="Like"], svg[aria-label*="like"], svg[aria-label*="Unlike"]');
+          for (const svg of heartSvgs) {
+            const section = svg.closest('section');
+            if (!section) continue;
+            // Find clickable elements in same section that aren't the heart button itself
+            const clickable = section.querySelectorAll('a[href], span[role="button"], button');
+            for (const el of clickable) {
+              const text = (el.textContent || '').trim();
+              if (/\d/.test(text) && /like|other/i.test(text)) {
+                el.click();
+                return true;
+              }
+              // Also try if parent has like-related href
+              if (el.tagName === 'A' && (el.href || '').includes('liked_by')) {
+                el.click();
+                return true;
+              }
+            }
+          }
+
+          return false;
+        });
+
+        if (dialogOpened) {
+          await delay(3000); // Wait for likers dialog to fully load
+
+          // ── Phase 3: Scroll the likers dialog to load more ──
+          for (let scroll = 0; scroll < 3; scroll++) {
+            await page.evaluate(() => {
+              // Find the scrollable dialog container
+              const dialog = document.querySelector('[role="dialog"]');
+              if (dialog) {
+                const scrollContainer = dialog.querySelector('[style*="overflow"]') ||
+                  dialog.querySelector('[class*="scroll"]') ||
+                  dialog;
+                scrollContainer.scrollTop = scrollContainer.scrollHeight;
+              }
+            });
+            await delay(1500);
+          }
+        }
+      } catch {}
+
+      // ── Phase 4: Extract likers from dialog DOM ──
+      const dialogLikers = await page.evaluate((pUser) => {
+        const likers = [];
+        const seen = new Set();
+        const blocked = new Set([
+          'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+          'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+          'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+          'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+        ]);
+        const isValid = (u) =>
+          u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
+
+        // Check for an open dialog — Instagram puts likers in a role="dialog" element
+        const dialog = document.querySelector('[role="dialog"]');
+        if (dialog) {
+          // Each liker row has: <a href="/username/">username</a> and <span>Full Name</span>
+          // Also look for "Follow" buttons next to usernames (indicates liker list)
+          const userLinks = dialog.querySelectorAll('a[href]');
+          for (const link of userLinks) {
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+            if (!match) continue;
+            const username = match[1];
+            if (!isValid(username) || seen.has(username)) continue;
+            seen.add(username);
+
+            // Try to get the display name from the link or sibling elements
+            let fullName = username;
+            const linkText = (link.textContent || '').trim();
+            if (linkText && linkText !== username) {
+              // Link text might be the display name, or might be the username
+              fullName = linkText;
+            }
+            // Check for a nearby span with the full name (Instagram puts it after username)
+            const row = link.closest('div[role="button"]') || link.closest('li') || link.parentElement?.parentElement;
+            if (row) {
+              const spans = row.querySelectorAll('span');
+              for (const span of spans) {
+                const t = (span.textContent || '').trim();
+                if (t && t !== username && t !== 'Follow' && t !== 'Following' && !seen.has(t) && t.length < 50) {
+                  fullName = t;
+                  break;
+                }
+              }
+            }
+
+            likers.push({ username, fullName });
+          }
+        }
+
+        // Also check "Liked by [username] and [N] others" section outside dialog
+        document.querySelectorAll('a[href]').forEach((el) => {
+          const href = el.getAttribute('href') || '';
+          const match = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+          if (!match) return;
+          const username = match[1];
+          if (!isValid(username) || seen.has(username)) return;
+
+          // Check 5 levels of ancestor context for like indicators
+          let ancestor = el.parentElement;
+          let foundLikeContext = false;
+          for (let i = 0; i < 5 && ancestor; i++) {
+            const text = (ancestor.textContent || '').toLowerCase();
+            if ((/liked|like|others/i.test(text)) && !/comment|reply|tagged/i.test(text)) {
+              foundLikeContext = true;
+              break;
+            }
+            // Also check data attributes and aria labels
+            const aria = ancestor.getAttribute?.('aria-label') || '';
+            if (/like/i.test(aria)) { foundLikeContext = true; break; }
+            ancestor = ancestor.parentElement;
+          }
+
+          if (!foundLikeContext) return;
+          seen.add(username);
+          likers.push({ username, fullName: (el.textContent || '').trim() || username });
+        });
+
+        return likers;
+      }, profileUsername);
+
+      page.off('response', handleResponse);
+
+      // ── Phase 5: Try navigating to /liked_by/ URL if we got nothing so far ──
+      const allSoFar = [...likerResults, ...jsonLikers, ...dialogLikers];
+      if (allSoFar.length === 0) {
+        try {
+          const likedByUrl = isReel
+            ? `https://www.instagram.com/reel/${shortcode}/liked_by/`
+            : `https://www.instagram.com/p/${shortcode}/liked_by/`;
+          await page.goto(likedByUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await delay(2500);
+
+          const likedByPageLikers = await page.evaluate((pUser) => {
+            const likers = [];
+            const seen = new Set();
+            const blocked = new Set([
+              'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+              'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+              'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+              'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+            ]);
+            const isValid = (u) =>
+              u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
+
+            // On the liked_by page, likers are listed with profile links
+            document.querySelectorAll('a[href]').forEach((link) => {
+              const href = link.getAttribute('href') || '';
+              const match = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+              if (!match) return;
+              const username = match[1];
+              if (!isValid(username) || seen.has(username)) return;
+              // Extra check: must have a "Follow" button nearby (confirms it's a user row)
+              const row = link.closest('div') || link.parentElement;
+              if (row) {
+                const hasFollowBtn = row.querySelector('button');
+                if (hasFollowBtn) {
+                  seen.add(username);
+                  likers.push({ username, fullName: (link.textContent || '').trim() || username });
+                }
+              }
+            });
+            return likers;
+          }, profileUsername);
+
+          allSoFar.push(...likedByPageLikers);
+        } catch {}
+      }
+
+      // Close any dialog
+      try {
+        await page.evaluate(() => {
+          const closeBtns = document.querySelectorAll('[aria-label="Close"], button svg[aria-label="Close"]');
+          for (const closeBtn of closeBtns) {
+            const btn = closeBtn.closest('button') || closeBtn;
+            btn.click();
+          }
+        });
+      } catch {}
+
+      // Combine all sources: XHR + JSON + dialog DOM + liked_by page
+      return [...likerResults, ...jsonLikers, ...dialogLikers, ...allSoFar.slice(likerResults.length + jsonLikers.length + dialogLikers.length)];
+    } catch {
+      page.off('response', handleResponse);
+      return [];
+    }
   }
 
   /**
@@ -645,7 +1517,12 @@ class InstagramScraper {
   /**
    * Strategy 3: Navigate to post & intercept XHR responses
    */
-  async _fetchCommentsViaInterception(page, shortcode) {
+  async _fetchCommentsViaInterception(page, post) {
+    const shortcode = typeof post === 'string' ? post : post.shortcode;
+    const isReel = typeof post === 'object' && post.isReel;
+    const postUrl = isReel
+      ? `https://www.instagram.com/reel/${shortcode}/`
+      : `https://www.instagram.com/p/${shortcode}/`;
     const comments = [];
 
     const handleResponse = async (response) => {
@@ -698,20 +1575,63 @@ class InstagramScraper {
             }
           }
         }
+
+        // ── Also extract liker data from GraphQL responses ──
+        if (media) {
+          const likeEdge = media.edge_media_preview_like || media.edge_liked_by;
+          if (likeEdge?.edges) {
+            const likers = [];
+            for (const edge of likeEdge.edges) {
+              if (edge.node?.username) {
+                likers.push({ username: edge.node.username, fullName: edge.node.full_name || edge.node.username });
+              }
+            }
+            if (likers.length > 0) {
+              const prev = this._discoveredLikers.get(shortcode) || [];
+              this._discoveredLikers.set(shortcode, [...prev, ...likers]);
+            }
+          }
+          // facepile_top_likers
+          if (media.facepile_top_likers && Array.isArray(media.facepile_top_likers)) {
+            const likers = [];
+            for (const u of media.facepile_top_likers) {
+              const uname = typeof u === 'string' ? u : u?.username;
+              if (uname) likers.push({ username: uname, fullName: u?.full_name || uname });
+            }
+            if (likers.length > 0) {
+              const prev = this._discoveredLikers.get(shortcode) || [];
+              this._discoveredLikers.set(shortcode, [...prev, ...likers]);
+            }
+          }
+        }
+        // REST likers format (in case a likers API fires during page load)
+        if (data.users && Array.isArray(data.users)) {
+          const likers = data.users
+            .filter(u => u.username)
+            .map(u => ({ username: u.username, fullName: u.full_name || u.username }));
+          if (likers.length > 0) {
+            const prev = this._discoveredLikers.get(shortcode) || [];
+            this._discoveredLikers.set(shortcode, [...prev, ...likers]);
+          }
+        }
       } catch {}
     };
 
     page.on('response', handleResponse);
 
     try {
-      await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
+      await page.goto(postUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
       await delay(3000);
 
-      // Click "View all comments" / "Load more"
-      for (let attempt = 0; attempt < 3; attempt++) {
+      // Scroll down to trigger comment loading
+      await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+      await delay(1500);
+
+      // Click "View all comments" / "Load more" multiple times
+      for (let attempt = 0; attempt < 5; attempt++) {
         try {
           const buttons = await page.$$('button, span[role="button"]');
           let clicked = false;
@@ -732,21 +1652,54 @@ class InstagramScraper {
     } catch {}
 
     page.off('response', handleResponse);
+
+    // Also extract comments from embedded page JSON if XHR interception got nothing
+    if (comments.length === 0) {
+      try {
+        const pageComments = await page.evaluate(() => {
+          const extracted = [];
+          document.querySelectorAll('script[type="application/json"]').forEach((script) => {
+            try {
+              const jsonStr = script.textContent;
+              // Look for comment structures with user+text in V1 format
+              const p1 = /\{[^{}]*"user"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g;
+              let m;
+              while ((m = p1.exec(jsonStr)) !== null) {
+                extracted.push({ username: m[1], fullName: m[1], text: m[2] || '' });
+              }
+              // GraphQL owner format
+              const p2 = /\{[^{}]*"owner"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g;
+              while ((m = p2.exec(jsonStr)) !== null) {
+                extracted.push({ username: m[1], fullName: m[1], text: m[2] || '' });
+              }
+            } catch {}
+          });
+          return extracted;
+        });
+        comments.push(...pageComments);
+      } catch {}
+    }
+
     return comments;
   }
 
   /**
-   * Strategy 4: DOM fallback — embedded JSON + page links
+   * Strategy 4: DOM fallback — extract commenters + comment text from embedded JSON & page DOM
    */
-  async _fetchCommentsDOMFallback(page, shortcode, profileUsername) {
+  async _fetchCommentsDOMFallback(page, post, profileUsername) {
+    const shortcode = typeof post === 'string' ? post : post.shortcode;
+    const isReel = typeof post === 'object' && post.isReel;
+    const postUrl = isReel
+      ? `https://www.instagram.com/reel/${shortcode}/`
+      : `https://www.instagram.com/p/${shortcode}/`;
     try {
-      await page.goto(`https://www.instagram.com/p/${shortcode}/`, {
+      await page.goto(postUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
       await delay(2000);
 
-      return page.evaluate((pUser) => {
+      const commentResults = await page.evaluate((pUser) => {
         const results = [];
         const seen = new Set();
         const blocked = new Set([
@@ -758,43 +1711,192 @@ class InstagramScraper {
         const isValid = (u) =>
           u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
 
-        // Embedded JSON
+        // ── Deep JSON parsing: extract comment objects with username + text ──
         document.querySelectorAll('script[type="application/json"]').forEach((script) => {
           try {
             const jsonStr = script.textContent;
-            for (const m of jsonStr.matchAll(/"username"\s*:\s*"([^"]+)"/g)) {
-              if (isValid(m[1]) && !seen.has(m[1])) {
-                seen.add(m[1]);
-                const nameRe = new RegExp(
-                  `"username"\\s*:\\s*"${m[1]}"[^}]*"full_name"\\s*:\\s*"([^"]*)"`
-                );
-                const nameMatch = nameRe.exec(jsonStr);
-                results.push({
-                  username: m[1],
-                  fullName: nameMatch ? nameMatch[1] : m[1],
-                  text: '',
-                });
+
+            // Method A: Find comment-like structures with both username and text
+            // Pattern: {..."user":{"username":"X",...},"text":"Y",...}
+            // OR:      {..."owner":{"username":"X",...},"text":"Y",...}
+            const commentBlockPatterns = [
+              /\{[^{}]*"user"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*(?:"full_name"\s*:\s*"([^"]*)")?[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g,
+              /\{[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*"user"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*(?:"full_name"\s*:\s*"([^"]*)")?[^{}]*\}[^{}]*\}/g,
+              /\{[^{}]*"owner"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g,
+            ];
+
+            // Pattern 1: user.username comes first, then text
+            let m;
+            const p1 = /\{[^{}]*"user"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g;
+            while ((m = p1.exec(jsonStr)) !== null) {
+              const username = m[1];
+              const text = m[2];
+              if (isValid(username) && !seen.has(username)) {
+                seen.add(username);
+                results.push({ username, fullName: username, text: text || '' });
+              }
+            }
+
+            // Pattern 2: owner.username format (GraphQL style)
+            const p2 = /\{[^{}]*"owner"\s*:\s*\{[^{}]*"username"\s*:\s*"([^"]+)"[^{}]*\}[^{}]*"text"\s*:\s*"([^"]*)"[^{}]*\}/g;
+            while ((m = p2.exec(jsonStr)) !== null) {
+              const username = m[1];
+              const text = m[2];
+              if (isValid(username) && !seen.has(username)) {
+                seen.add(username);
+                results.push({ username, fullName: username, text: text || '' });
+              }
+            }
+
+            // Fallback: plain username extraction if above found nothing
+            if (results.length === 0) {
+              for (const um of jsonStr.matchAll(/"username"\s*:\s*"([^"]+)"/g)) {
+                if (isValid(um[1]) && !seen.has(um[1])) {
+                  seen.add(um[1]);
+                  const nameRe = new RegExp(
+                    `"username"\\s*:\\s*"${um[1]}"[^}]*"full_name"\\s*:\\s*"([^"]*)"`
+                  );
+                  const nameMatch = nameRe.exec(jsonStr);
+                  // Try to find nearby text field
+                  const textRe = new RegExp(
+                    `"username"\\s*:\\s*"${um[1]}"[^}]*?"text"\\s*:\\s*"([^"]*)"`
+                  );
+                  const textMatch = textRe.exec(jsonStr);
+                  results.push({
+                    username: um[1],
+                    fullName: nameMatch ? nameMatch[1] : um[1],
+                    text: textMatch ? textMatch[1] : '',
+                  });
+                }
               }
             }
           } catch {}
         });
 
-        // DOM links
-        document.querySelectorAll('a[href]').forEach((el) => {
-          const match = (el.getAttribute('href') || '').match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
-          if (!match) return;
-          const username = match[1];
-          if (!isValid(username) || seen.has(username)) return;
-          const text = (el.textContent || '').trim();
-          if (text.length > 50 || text.includes('\n') || !text) return;
-          if (/^(Sign Up|Log In|Clip|View|More|Share|Save|Like|Reply|Follow|Following|Message|Options)$/i.test(text))
-            return;
-          seen.add(username);
-          results.push({ username, fullName: text || username, text: '' });
+        // ── DOM comment elements: try to extract visible comments ──
+        // Instagram renders comments as <ul> with <li> containing username + text
+        document.querySelectorAll('ul li, div[role="button"]').forEach((el) => {
+          try {
+            const links = el.querySelectorAll('a[href]');
+            links.forEach((link) => {
+              const href = link.getAttribute('href') || '';
+              const match = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+              if (!match) return;
+              const username = match[1];
+              if (!isValid(username) || seen.has(username)) return;
+
+              // The comment text is usually the text content of the parent element
+              // minus the username itself
+              const parentEl = link.closest('li') || link.closest('div') || link.parentElement;
+              let commentText = '';
+              if (parentEl) {
+                commentText = (parentEl.textContent || '').trim();
+                // Remove the username from start
+                commentText = commentText.replace(new RegExp(`^${username}\\s*`), '').trim();
+                // Skip if it's a UI element, not a comment
+                if (commentText.length > 500 || /^(Follow|Like|Reply|View|Load|Sign|Log)\b/i.test(commentText)) {
+                  commentText = '';
+                }
+              }
+
+              seen.add(username);
+              results.push({
+                username,
+                fullName: (link.textContent || '').trim() || username,
+                text: commentText,
+              });
+            });
+          } catch {}
         });
+
+        // ── Fallback: plain profile links ──
+        if (results.length === 0) {
+          document.querySelectorAll('a[href]').forEach((el) => {
+            const match = (el.getAttribute('href') || '').match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+            if (!match) return;
+            const username = match[1];
+            if (!isValid(username) || seen.has(username)) return;
+            const text = (el.textContent || '').trim();
+            if (text.length > 50 || text.includes('\n') || !text) return;
+            if (/^(Sign Up|Log In|Clip|View|More|Share|Save|Like|Reply|Follow|Following|Message|Options)$/i.test(text))
+              return;
+            seen.add(username);
+            results.push({ username, fullName: text || username, text: '' });
+          });
+        }
 
         return results;
       }, profileUsername);
+
+      // Also extract liker data from the page we just visited
+      try {
+        const pageLikers = await page.evaluate((pUser) => {
+          const likers = [];
+          const seen = new Set();
+          const blocked = new Set([
+            'instagram', 'explore', 'reels', 'stories', 'accounts', 'about',
+            'developer', 'legal', 'privacy', 'terms', 'help', 'press',
+            'api', 'blog', 'jobs', 'nametag', 'session', 'login',
+            'signup', 'sign_up', 'direct', 'p', 'reel', 'tv',
+          ]);
+          const isValid = (u) =>
+            u && /^[a-zA-Z0-9._]{1,30}$/.test(u) && u !== pUser && !blocked.has(u.toLowerCase());
+
+          // Deep search all JSON for liker data
+          function deepSearch(obj, depth) {
+            if (depth > 15 || !obj || typeof obj !== 'object') return;
+            if (Array.isArray(obj.top_likers)) {
+              for (const u of obj.top_likers) {
+                const uname = typeof u === 'string' ? u : u?.username;
+                if (uname && isValid(uname) && !seen.has(uname)) {
+                  seen.add(uname);
+                  likers.push({ username: uname, fullName: u?.full_name || uname });
+                }
+              }
+            }
+            if (Array.isArray(obj.facepile_top_likers)) {
+              for (const u of obj.facepile_top_likers) {
+                const uname = typeof u === 'string' ? u : u?.username;
+                if (uname && isValid(uname) && !seen.has(uname)) {
+                  seen.add(uname);
+                  likers.push({ username: uname, fullName: u?.full_name || uname });
+                }
+              }
+            }
+            const likeEdge = obj.edge_media_preview_like || obj.edge_liked_by;
+            if (likeEdge?.edges && Array.isArray(likeEdge.edges)) {
+              for (const edge of likeEdge.edges) {
+                if (edge?.node?.username && isValid(edge.node.username) && !seen.has(edge.node.username)) {
+                  seen.add(edge.node.username);
+                  likers.push({ username: edge.node.username, fullName: edge.node.full_name || edge.node.username });
+                }
+              }
+            }
+            if (Array.isArray(obj)) {
+              for (let i = 0; i < Math.min(obj.length, 200); i++) deepSearch(obj[i], depth + 1);
+            } else {
+              for (const key of Object.keys(obj)) {
+                if (key === '__typename' || key === 'csrf_token') continue;
+                try { deepSearch(obj[key], depth + 1); } catch {}
+              }
+            }
+          }
+
+          document.querySelectorAll('script[type="application/json"]').forEach((script) => {
+            try { deepSearch(JSON.parse(script.textContent), 0); } catch {}
+          });
+          try { if (window._sharedData) deepSearch(window._sharedData, 0); } catch {}
+
+          return likers;
+        }, profileUsername);
+
+        if (pageLikers.length > 0) {
+          const prev = this._discoveredLikers.get(shortcode) || [];
+          this._discoveredLikers.set(shortcode, [...prev, ...pageLikers]);
+        }
+      } catch {}
+
+      return commentResults;
     } catch {
       return [];
     }
@@ -831,6 +1933,7 @@ class InstagramScraper {
               shortcode: edge.node?.shortcode || edge.node?.code,
               id: edge.node?.id || edge.node?.pk?.toString(),
               commentCount: edge.node?.edge_media_to_comment?.count || edge.node?.comment_count || 0,
+              likeCount: edge.node?.edge_liked_by?.count || edge.node?.edge_media_preview_like?.count || edge.node?.like_count || 0,
             }))
             .filter((p) => p.shortcode);
         } catch {
@@ -856,12 +1959,23 @@ class InstagramScraper {
 
     const customers = [];
     for (const post of posts.slice(0, 8)) {
-      if (post.commentCount === 0) continue;
-      try {
-        const { commenters } = await this._fetchPostCommenters(page, post, '', brandName);
-        customers.push(...commenters);
-      } catch {}
-      await delay(1500 + Math.random() * 2500);
+      // Fetch commenters
+      if (post.commentCount > 0) {
+        try {
+          const { commenters } = await this._fetchPostCommenters(page, post, '', brandName);
+          customers.push(...commenters);
+        } catch {}
+        await delay(1500 + Math.random() * 2500);
+      }
+
+      // Fetch likers
+      if (post.likeCount > 0) {
+        try {
+          const likers = await this._fetchPostLikers(page, post, '', brandName);
+          customers.push(...likers);
+        } catch {}
+        await delay(1500 + Math.random() * 2500);
+      }
     }
 
     return customers;
@@ -896,6 +2010,7 @@ class InstagramScraper {
                 shortcode: edge.node.shortcode,
                 id: edge.node.id,
                 commentCount: edge.node.edge_media_to_comment?.count || 0,
+                likeCount: edge.node.edge_liked_by?.count || edge.node.edge_media_preview_like?.count || 0,
               }));
             }
           } catch {}
@@ -932,9 +2047,16 @@ class InstagramScraper {
       const customers = [];
       for (const shortcode of shortcodes.slice(0, this.MAX_POSTS)) {
         try {
-          const post = { shortcode, id: null, commentCount: 1 };
+          const post = { shortcode, id: null, commentCount: 1, likeCount: 1, isReel: false };
           const { commenters } = await this._fetchPostCommenters(page, post, username, brandName);
           customers.push(...commenters);
+        } catch {}
+        await delay(1500 + Math.random() * 2500);
+
+        try {
+          const post = { shortcode, id: null, commentCount: 1, likeCount: 1, isReel: false };
+          const likers = await this._fetchPostLikers(page, post, username, brandName);
+          customers.push(...likers);
         } catch {}
         await delay(1500 + Math.random() * 2500);
       }

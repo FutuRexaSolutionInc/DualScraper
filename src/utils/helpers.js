@@ -1,18 +1,63 @@
 const { v4: uuidv4 } = require('uuid');
 
 /**
- * Normalize and deduplicate customer records
+ * Normalize and deduplicate customer records.
+ * When a user appears in both comments and likes, merge their engagement
+ * records and keep all comments. Ensures no duplicate entries per username.
  */
 function deduplicateCustomers(customers) {
   const seen = new Map();
   for (const c of customers) {
     const key = (c.username || c.name || c.email || '').toLowerCase().trim();
-    if (key && !seen.has(key)) {
-      seen.set(key, c);
-    } else if (key && seen.has(key)) {
-      // Merge extra info
+    if (!key) continue;
+
+    if (!seen.has(key)) {
+      // First occurrence — store with engagements array
+      const record = { ...c };
+      record.engagements = [];
+      if (c.engagement) {
+        record.engagements.push({
+          type: c.engagement.type,
+          postCode: c.engagement.postCode,
+          comment: c.comment || null,
+        });
+      }
+      seen.set(key, record);
+    } else {
+      // Merge: accumulate engagement records, prefer richer name
       const existing = seen.get(key);
-      seen.set(key, { ...existing, ...c, sources: mergeArrays(existing.sources, c.sources) });
+      if (c.name && (!existing.name || existing.name === existing.username)) {
+        existing.name = c.name;
+      }
+      existing.sources = mergeArrays(existing.sources, c.sources);
+
+      // Add new engagement if not already tracked
+      if (c.engagement) {
+        const isDupe = existing.engagements.some(
+          (e) => e.type === c.engagement.type && e.postCode === c.engagement.postCode
+        );
+        if (!isDupe) {
+          existing.engagements.push({
+            type: c.engagement.type,
+            postCode: c.engagement.postCode,
+            comment: c.comment || null,
+          });
+        }
+      }
+
+      // Keep the first non-null comment as the primary display comment
+      if (!existing.comment && c.comment) {
+        existing.comment = c.comment;
+      }
+
+      // Derive a combined engagement summary
+      const types = [...new Set(existing.engagements.map((e) => e.type))];
+      existing.engagement = {
+        type: types.join(', '),
+        postCode: existing.engagements.map((e) => e.postCode).filter(Boolean).join(', '),
+      };
+
+      seen.set(key, existing);
     }
   }
   return Array.from(seen.values());

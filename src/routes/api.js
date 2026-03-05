@@ -260,6 +260,7 @@ function createApiRouter(orchestrator) {
         completedJobs: completed,
         totalExports: exports.length,
         configuredBrands: getAllBrands().length,
+        igAuthenticated: false,
         memory: {
           rssMB: Math.round(mem.rss / 1024 / 1024),
           heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),

@@ -169,6 +169,7 @@
       $('#statExports').textContent = s.totalExports;
       $('#statEngine').textContent = 'Online';
 
+      // Update IG auth status
       loadJobs();
       loadExports();
     } catch {
@@ -552,14 +553,33 @@
         ? `<a href="${c.profileUrl}" target="_blank" class="profile-link">${icon('externalLink', 'btn-icon')} View</a>`
         : '—';
       const engagementType = c.engagement?.type || c.engagementType || '—';
+
+      // Build engagement badge(s)
+      let engagementBadge = '';
+      const types = engagementType.split(',').map(t => t.trim()).filter(Boolean);
+      types.forEach(t => {
+        if (t === 'comment') {
+          engagementBadge += '<span class="engagement-badge comment-badge">💬 comment</span> ';
+        } else if (t === 'like') {
+          engagementBadge += '<span class="engagement-badge like-badge">❤️ like</span> ';
+        } else {
+          engagementBadge += `<span class="engagement-badge">${escHtml(t)}</span> `;
+        }
+      });
+      if (!engagementBadge) engagementBadge = '—';
+
       const content = c.comment || c.content || '—';
+
+      // Show engagement count if user has multiple engagements
+      const engCount = c.engagements?.length || 0;
+      const engCountLabel = engCount > 1 ? ` <small style="color:var(--text-muted)">(${engCount} interactions)</small>` : '';
 
       html += `
             <tr>
               <td>${start + i + 1}</td>
-              <td><strong>${escHtml(c.name || c.username || 'Unknown')}</strong></td>
+              <td><strong>${escHtml(c.name || c.username || 'Unknown')}</strong><br><small style="color:var(--text-muted)">@${escHtml(c.username || '')}</small></td>
               <td><span class="source-badge instagram">${icon('instagram')} instagram</span></td>
-              <td>${escHtml(engagementType)}</td>
+              <td>${engagementBadge}${engCountLabel}</td>
               <td title="${escHtml(content)}">${truncate(content, 60)}</td>
               <td>${profileHtml}</td>
             </tr>`;
